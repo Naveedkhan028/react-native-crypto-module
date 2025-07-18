@@ -1,6 +1,6 @@
 {
   "name": "react-native-crypto-module",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A React Native module for AES-256-CBC file decryption on iOS and Android",
   "main": "index.js",
   "types": "src/index.ts",
@@ -16,12 +16,12 @@
     "ios",
     "android"
   ],
-  "author": "Your Name",
+  "author": "Navid Ahmad",
   "license": "MIT",
-  "homepage": "https://github.com/yourusername/react-native-crypto-module",
+  "homepage": "https://github.com/Naveedkhan028/react-native-crypto-module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/react-native-crypto-module.git"
+    "url": "git+https://github.com/Naveedkhan028/react-native-crypto-module.git"
   },
   "peerDependencies": {
     "react": "*",
@@ -32,6 +32,6 @@
     "react-native": "*"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/react-native-crypto-module/issues"
+    "url": "https://github.com/Naveedkhan028/react-native-crypto-module/issues"
   }
 }
