@@ -12,7 +12,7 @@ import java.util.List;
 public class CryptoModulePackage implements ReactPackage {
     @Override
     public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
-        return Arrays.<NativeModule>asList(new Cry(reactContext));
+        return Arrays.<NativeModule>asList(new CryptoModule(reactContext));
     }
 
     @Override
