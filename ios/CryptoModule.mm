@@ -214,5 +214,211 @@ RCT_REMAP_METHOD(decryptFile,
     reject(@"DECRYPT_FAILED", errorMessage, nil);
   }
 }
+// Add this method to your CryptoModule.mm file
+
+RCT_REMAP_METHOD(encryptDataStreaming,
+                 inputData:(NSString *)inputDataBase64
+                 keyBase64:(NSString *)keyBase64
+                 ivBase64:(NSString *)ivBase64
+                 chunkSize:(NSNumber *)chunkSize
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSLog(@"=== STREAMING ENCRYPTION START ===");
+  
+  // Convert base64 inputs to data
+  NSData *inputData = [[NSData alloc] initWithBase64EncodedString:inputDataBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  NSData *keyData = [[NSData alloc] initWithBase64EncodedString:keyBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  NSData *ivData = [[NSData alloc] initWithBase64EncodedString:ivBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  
+  if (!inputData || !keyData || !ivData) {
+    reject(@"ENCRYPT_FAILED", @"Invalid input data", nil);
+    return;
+  }
+  
+  if (keyData.length != 32) {
+    reject(@"ENCRYPT_FAILED", @"Invalid key length", nil);
+    return;
+  }
+  
+  if (ivData.length != 16) {
+    reject(@"ENCRYPT_FAILED", @"Invalid IV length", nil);
+    return;
+  }
+  
+  NSUInteger chunkSizeValue = [chunkSize unsignedIntegerValue];
+  if (chunkSizeValue == 0) {
+    chunkSizeValue = 64 * 1024; // Default 64KB
+  }
+  
+  const size_t AES_BLOCK_SIZE = 16;
+  NSUInteger totalLength = inputData.length;
+  NSMutableArray *encryptedChunks = [NSMutableArray array];
+  
+  // Create cryptor for streaming
+  CCCryptorRef cryptor;
+  CCCryptorStatus status = CCCryptorCreate(
+    kCCEncrypt,
+    kCCAlgorithmAES,
+    kCCOptionPKCS7Padding,
+    keyData.bytes,
+    keyData.length,
+    ivData.bytes,
+    &cryptor
+  );
+  
+  if (status != kCCSuccess) {
+    reject(@"ENCRYPT_FAILED", @"Failed to create cryptor", nil);
+    return;
+  }
+  
+  NSUInteger totalProcessed = 0;
+  
+  @try {
+    for (NSUInteger start = 0; start < totalLength; start += chunkSizeValue) {
+      BOOL isLastChunk = (start + chunkSizeValue >= totalLength);
+      NSUInteger currentChunkSize = MIN(chunkSizeValue, totalLength - start);
+      
+      NSData *chunk = [inputData subdataWithRange:NSMakeRange(start, currentChunkSize)];
+      
+      NSLog(@"Processing chunk %lu, size: %lu, isLast: %d", 
+            (unsigned long)(start / chunkSizeValue + 1), 
+            (unsigned long)chunk.length, 
+            isLastChunk);
+      
+      // For non-final chunks, ensure block alignment
+      if (!isLastChunk) {
+        NSUInteger alignedSize = (chunk.length / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+        if (alignedSize < chunk.length) {
+          chunk = [chunk subdataWithRange:NSMakeRange(0, alignedSize)];
+          NSLog(@"Aligned chunk to: %lu bytes", (unsigned long)chunk.length);
+        }
+      }
+      
+      // Calculate output buffer size
+      size_t outputLength = chunk.length + AES_BLOCK_SIZE;
+      NSMutableData *outputData = [NSMutableData dataWithLength:outputLength];
+      size_t actualOutputLength = 0;
+      
+      // Update cryptor with chunk
+      if (isLastChunk) {
+        // Final update
+        status = CCCryptorFinal(
+          cryptor,
+          outputData.mutableBytes,
+          outputData.length,
+          &actualOutputLength
+        );
+      } else {
+        // Regular update
+        status = CCCryptorUpdate(
+          cryptor,
+          chunk.bytes,
+          chunk.length,
+          outputData.mutableBytes,
+          outputData.length,
+          &actualOutputLength
+        );
+      }
+      
+      if (status != kCCSuccess) {
+        CCCryptorRelease(cryptor);
+        reject(@"ENCRYPT_FAILED", [NSString stringWithFormat:@"Encryption failed at chunk %lu", (unsigned long)(start / chunkSizeValue + 1)], nil);
+        return;
+      }
+      
+      if (actualOutputLength > 0) {
+        NSData *chunkOutput = [NSData dataWithBytes:outputData.bytes length:actualOutputLength];
+        [encryptedChunks addObject:[chunkOutput base64EncodedStringWithOptions:0]];
+        NSLog(@"Chunk encrypted output size: %lu", (unsigned long)actualOutputLength);
+      }
+      
+      totalProcessed += chunk.length;
+    }
+    
+    CCCryptorRelease(cryptor);
+    
+    NSLog(@"✅ Streaming encryption completed");
+    NSLog(@"Total chunks processed: %lu", (unsigned long)encryptedChunks.count);
+    
+    resolve(@{
+      @"encryptedChunks": encryptedChunks,
+      @"totalChunks": @(encryptedChunks.count),
+      @"totalProcessed": @(totalProcessed)
+    });
+    
+  } @catch (NSException *exception) {
+    CCCryptorRelease(cryptor);
+    reject(@"ENCRYPT_FAILED", [NSString stringWithFormat:@"Exception during encryption: %@", exception.reason], nil);
+  }
+}
+
+RCT_REMAP_METHOD(decryptTextContent,
+                 encryptedContentBase64:(NSString *)encryptedContentBase64
+                 keyBase64:(NSString *)keyBase64
+                 ivBase64:(NSString *)ivBase64
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSLog(@"=== TEXT DECRYPTION START ===");
+  
+  if (!encryptedContentBase64 || encryptedContentBase64.length == 0) {
+    reject(@"DECRYPT_FAILED", @"Invalid encrypted content", nil);
+    return;
+  }
+  
+  // Convert base64 inputs to data
+  NSData *encryptedData = [[NSData alloc] initWithBase64EncodedString:encryptedContentBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  NSData *keyData = [[NSData alloc] initWithBase64EncodedString:keyBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  NSData *ivData = [[NSData alloc] initWithBase64EncodedString:ivBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  
+  if (!encryptedData || !keyData || !ivData) {
+    reject(@"DECRYPT_FAILED", @"Invalid input data", nil);
+    return;
+  }
+  
+  if (keyData.length != 32) {
+    reject(@"DECRYPT_FAILED", @"Invalid key length", nil);
+    return;
+  }
+  
+  if (ivData.length != 16) {
+    reject(@"DECRYPT_FAILED", @"Invalid IV length", nil);
+    return;
+  }
+  
+  // Perform AES-256-CBC decryption
+  size_t outLength;
+  NSMutableData *decryptedData = [NSMutableData dataWithLength:encryptedData.length + kCCBlockSizeAES128];
+  
+  CCCryptorStatus result = CCCrypt(
+    kCCDecrypt,
+    kCCAlgorithmAES,
+    kCCOptionPKCS7Padding,
+    keyData.bytes, keyData.length,
+    ivData.bytes,
+    encryptedData.bytes, encryptedData.length,
+    decryptedData.mutableBytes, decryptedData.length,
+    &outLength
+  );
+  
+  if (result == kCCSuccess) {
+    decryptedData.length = outLength;
+    
+    // Convert to string
+    NSString *decryptedString = [[NSString alloc] initWithData:decryptedData encoding:NSUTF8StringEncoding];
+    
+    if (decryptedString) {
+      NSLog(@"✅ Text decryption successful");
+      resolve(decryptedString);
+    } else {
+      reject(@"DECRYPT_FAILED", @"Failed to convert decrypted data to string", nil);
+    }
+  } else {
+    NSString *errorMessage = [NSString stringWithFormat:@"Decryption failed with status: %d", result];
+    NSLog(@"❌ %@", errorMessage);
+    reject(@"DECRYPT_FAILED", errorMessage, nil);
+  }
+}
 
 @end
