@@ -1,5 +1,5 @@
 
-package main.java.com.cryptomodule;
+package com.cryptomodule;
 import android.util.Log;
 import android.util.Base64;
 import com.facebook.react.bridge.ReactApplicationContext;

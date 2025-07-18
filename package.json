@@ -30,5 +30,8 @@
   "devDependencies": {
     "react": "*",
     "react-native": "*"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/react-native-crypto-module/issues"
   }
 }
