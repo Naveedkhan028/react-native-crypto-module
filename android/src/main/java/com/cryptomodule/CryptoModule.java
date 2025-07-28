@@ -175,96 +175,97 @@ public class CryptoModule extends ReactContextBaseJavaModule {
         }
     }
     @ReactMethod
-public void encryptDataStreaming(String inputDataBase64, String keyBase64, String ivBase64, int chunkSize, Promise promise) {
-    try {
-        Log.d(TAG, "=== STREAMING ENCRYPTION START ===");
-        
-        // Convert base64 inputs
-        byte[] inputData = Base64.decode(inputDataBase64, Base64.DEFAULT);
-        byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
-        byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
-        
-        if (keyBytes.length != 32) {
-            promise.reject("ENCRYPT_FAILED", "Invalid key length");
-            return;
-        }
-        
-        if (ivBytes.length != 16) {
-            promise.reject("ENCRYPT_FAILED", "Invalid IV length");
-            return;
-        }
-        
-        if (chunkSize <= 0) {
-            chunkSize = 64 * 1024; // Default 64KB
-        }
-        
-        final int AES_BLOCK_SIZE = 16;
-        SecretKeySpec secretKey = new SecretKeySpec(keyBytes, "AES");
-        IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
-        
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey, ivSpec);
-        
-        List<String> encryptedChunks = new ArrayList<>();
-        int totalLength = inputData.length;
-        int totalProcessed = 0;
-        
-        for (int start = 0; start < totalLength; start += chunkSize) {
-            boolean isLastChunk = (start + chunkSize >= totalLength);
-            int currentChunkSize = Math.min(chunkSize, totalLength - start);
+    public void encryptDataStreaming(String inputDataBase64, String keyBase64, String ivBase64, int chunkSize, Promise promise) {
+        try {
+            Log.d(TAG, "=== STREAMING ENCRYPTION START ===");
             
-            byte[] chunk = Arrays.copyOfRange(inputData, start, start + currentChunkSize);
+            // Convert base64 inputs
+            byte[] inputData = Base64.decode(inputDataBase64, Base64.DEFAULT);
+            byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
+            byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
             
-            Log.d(TAG, String.format("Processing chunk %d, size: %d, isLast: %b", 
-                  (start / chunkSize + 1), chunk.length, isLastChunk));
+            if (keyBytes.length != 32) {
+                promise.reject("ENCRYPT_FAILED", "Invalid key length");
+                return;
+            }
             
-            // For non-final chunks, ensure block alignment
-            if (!isLastChunk) {
-                int alignedSize = (chunk.length / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
-                if (alignedSize < chunk.length) {
-                    chunk = Arrays.copyOf(chunk, alignedSize);
-                    Log.d(TAG, String.format("Aligned chunk to: %d bytes", chunk.length));
+            if (ivBytes.length != 16) {
+                promise.reject("ENCRYPT_FAILED", "Invalid IV length");
+                return;
+            }
+            
+            if (chunkSize <= 0) {
+                chunkSize = 64 * 1024; // Default 64KB
+            }
+            
+            final int AES_BLOCK_SIZE = 16;
+            SecretKeySpec secretKey = new SecretKeySpec(keyBytes, "AES");
+            IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+            
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, ivSpec);
+            
+            List<String> encryptedChunks = new ArrayList<>();
+            int totalLength = inputData.length;
+            int totalProcessed = 0;
+            
+            for (int start = 0; start < totalLength; start += chunkSize) {
+                boolean isLastChunk = (start + chunkSize >= totalLength);
+                int currentChunkSize = Math.min(chunkSize, totalLength - start);
+                
+                byte[] chunk = Arrays.copyOfRange(inputData, start, start + currentChunkSize);
+                
+                Log.d(TAG, String.format("Processing chunk %d, size: %d, isLast: %b", 
+                      (start / chunkSize + 1), chunk.length, isLastChunk));
+                
+                // For non-final chunks, ensure block alignment
+                if (!isLastChunk) {
+                    int alignedSize = (chunk.length / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+                    if (alignedSize < chunk.length) {
+                        chunk = Arrays.copyOf(chunk, alignedSize);
+                        Log.d(TAG, String.format("Aligned chunk to: %d bytes", chunk.length));
+                    }
                 }
+                
+                byte[] chunkOutput;
+                if (isLastChunk) {
+                    // Final chunk
+                    chunkOutput = cipher.doFinal(chunk);
+                } else {
+                    // Regular chunk
+                    chunkOutput = cipher.update(chunk);
+                }
+                
+                if (chunkOutput != null && chunkOutput.length > 0) {
+                    String chunkBase64 = Base64.encodeToString(chunkOutput, Base64.DEFAULT);
+                    encryptedChunks.add(chunkBase64);
+                    Log.d(TAG, String.format("Chunk encrypted output size: %d", chunkOutput.length));
+                }
+                
+                totalProcessed += chunk.length;
             }
             
-            byte[] chunkOutput;
-            if (isLastChunk) {
-                // Final chunk
-                chunkOutput = cipher.doFinal(chunk);
-            } else {
-                // Regular chunk
-                chunkOutput = cipher.update(chunk);
+            Log.d(TAG, "✅ Streaming encryption completed");
+            Log.d(TAG, String.format("Total chunks processed: %d", encryptedChunks.size()));
+            
+            WritableMap result = Arguments.createMap();
+            WritableArray chunksArray = Arguments.createArray();
+            for (String chunk : encryptedChunks) {
+                chunksArray.pushString(chunk);
             }
             
-            if (chunkOutput != null && chunkOutput.length > 0) {
-                String chunkBase64 = Base64.encodeToString(chunkOutput, Base64.DEFAULT);
-                encryptedChunks.add(chunkBase64);
-                Log.d(TAG, String.format("Chunk encrypted output size: %d", chunkOutput.length));
-            }
+            result.putArray("encryptedChunks", chunksArray);
+            result.putInt("totalChunks", encryptedChunks.size());
+            result.putInt("totalProcessed", totalProcessed);
             
-            totalProcessed += chunk.length;
+            promise.resolve(result);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Streaming encryption failed", e);
+            promise.reject("ENCRYPT_FAILED", "Streaming encryption failed: " + e.getMessage());
         }
-        
-        Log.d(TAG, "✅ Streaming encryption completed");
-        Log.d(TAG, String.format("Total chunks processed: %d", encryptedChunks.size()));
-        
-        WritableMap result = Arguments.createMap();
-        WritableArray chunksArray = Arguments.createArray();
-        for (String chunk : encryptedChunks) {
-            chunksArray.pushString(chunk);
-        }
-        
-        result.putArray("encryptedChunks", chunksArray);
-        result.putInt("totalChunks", encryptedChunks.size());
-        result.putInt("totalProcessed", totalProcessed);
-        
-        promise.resolve(result);
-        
-    } catch (Exception e) {
-        Log.e(TAG, "Streaming encryption failed", e);
-        promise.reject("ENCRYPT_FAILED", "Streaming encryption failed: " + e.getMessage());
     }
-    
+
     @ReactMethod
     public void encryptTextContent(String textContent, String keyBase64, String ivBase64, Promise promise) {
         try {
@@ -317,47 +318,47 @@ public void encryptDataStreaming(String inputDataBase64, String keyBase64, Strin
             promise.reject("ENCRYPT_FAILED", "Text encryption failed: " + e.getMessage());
         }
     }
-}
-@ReactMethod
-public void decryptTextContent(String encryptedContentBase64, String keyBase64, String ivBase64, Promise promise) {
-    try {
-        Log.d(TAG, "=== TEXT DECRYPTION START ===");
-        
-        if (encryptedContentBase64 == null || encryptedContentBase64.isEmpty()) {
-            promise.reject("DECRYPT_FAILED", "Invalid encrypted content");
-            return;
+
+    @ReactMethod
+    public void decryptTextContent(String encryptedContentBase64, String keyBase64, String ivBase64, Promise promise) {
+        try {
+            Log.d(TAG, "=== TEXT DECRYPTION START ===");
+            
+            if (encryptedContentBase64 == null || encryptedContentBase64.isEmpty()) {
+                promise.reject("DECRYPT_FAILED", "Invalid encrypted content");
+                return;
+            }
+            
+            // Convert base64 inputs
+            byte[] encryptedData = Base64.decode(encryptedContentBase64, Base64.DEFAULT);
+            byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
+            byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
+            
+            if (keyBytes.length != 32) {
+                promise.reject("DECRYPT_FAILED", "Invalid key length");
+                return;
+            }
+            
+            if (ivBytes.length != 16) {
+                promise.reject("DECRYPT_FAILED", "Invalid IV length");
+                return;
+            }
+            
+            SecretKeySpec secretKey = new SecretKeySpec(keyBytes, "AES");
+            IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+            
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec);
+            
+            byte[] decryptedBytes = cipher.doFinal(encryptedData);
+            String decryptedString = new String(decryptedBytes, StandardCharsets.UTF_8);
+            
+            Log.d(TAG, "✅ Text decryption successful");
+            promise.resolve(decryptedString);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Text decryption failed", e);
+            promise.reject("DECRYPT_FAILED", "Text decryption failed: " + e.getMessage());
         }
-        
-        // Convert base64 inputs
-        byte[] encryptedData = Base64.decode(encryptedContentBase64, Base64.DEFAULT);
-        byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
-        byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
-        
-        if (keyBytes.length != 32) {
-            promise.reject("DECRYPT_FAILED", "Invalid key length");
-            return;
-        }
-        
-        if (ivBytes.length != 16) {
-            promise.reject("DECRYPT_FAILED", "Invalid IV length");
-            return;
-        }
-        
-        SecretKeySpec secretKey = new SecretKeySpec(keyBytes, "AES");
-        IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
-        
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec);
-        
-        byte[] decryptedBytes = cipher.doFinal(encryptedData);
-        String decryptedString = new String(decryptedBytes, StandardCharsets.UTF_8);
-        
-        Log.d(TAG, "✅ Text decryption successful");
-        promise.resolve(decryptedString);
-        
-    } catch (Exception e) {
-        Log.e(TAG, "Text decryption failed", e);
-        promise.reject("DECRYPT_FAILED", "Text decryption failed: " + e.getMessage());
     }
-}
 }
