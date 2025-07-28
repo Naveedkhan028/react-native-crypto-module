@@ -264,6 +264,59 @@ public void encryptDataStreaming(String inputDataBase64, String keyBase64, Strin
         Log.e(TAG, "Streaming encryption failed", e);
         promise.reject("ENCRYPT_FAILED", "Streaming encryption failed: " + e.getMessage());
     }
+    
+    @ReactMethod
+    public void encryptTextContent(String textContent, String keyBase64, String ivBase64, Promise promise) {
+        try {
+            Log.d(TAG, "=== TEXT ENCRYPTION START ===");
+            
+            if (textContent == null || textContent.isEmpty()) {
+                promise.reject("ENCRYPT_FAILED", "Invalid text content");
+                return;
+            }
+            
+            // Convert base64 inputs
+            byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
+            byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
+            
+            if (keyBytes.length != 32) {
+                promise.reject("ENCRYPT_FAILED", "Invalid key length");
+                return;
+            }
+            
+            if (ivBytes.length != 16) {
+                promise.reject("ENCRYPT_FAILED", "Invalid IV length");
+                return;
+            }
+            
+            // Convert text to bytes
+            byte[] textData = textContent.getBytes(StandardCharsets.UTF_8);
+            
+            Log.d(TAG, "Text data length: " + textData.length);
+            
+            // Perform AES-256-CBC encryption
+            SecretKeySpec secretKey = new SecretKeySpec(keyBytes, "AES");
+            IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+            
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, ivSpec);
+            
+            byte[] encryptedBytes = cipher.doFinal(textData);
+            
+            // Convert to base64 string
+            String encryptedBase64 = Base64.encodeToString(encryptedBytes, Base64.DEFAULT);
+            
+            Log.d(TAG, "✅ Text encryption successful");
+            Log.d(TAG, "Original size: " + textData.length);
+            Log.d(TAG, "Encrypted size: " + encryptedBytes.length);
+            
+            promise.resolve(encryptedBase64);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Text encryption failed", e);
+            promise.reject("ENCRYPT_FAILED", "Text encryption failed: " + e.getMessage());
+        }
+    }
 }
 @ReactMethod
 public void decryptTextContent(String encryptedContentBase64, String keyBase64, String ivBase64, Promise promise) {
