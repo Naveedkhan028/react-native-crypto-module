@@ -421,4 +421,74 @@ RCT_REMAP_METHOD(decryptTextContent,
   }
 }
 
+RCT_REMAP_METHOD(encryptTextContent,
+                 textContent:(NSString *)textContent
+                 keyBase64:(NSString *)keyBase64
+                 ivBase64:(NSString *)ivBase64
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSLog(@"=== TEXT ENCRYPTION START ===");
+  
+  if (!textContent || textContent.length == 0) {
+    reject(@"ENCRYPT_FAILED", @"Invalid text content", nil);
+    return;
+  }
+  
+  // Convert base64 inputs to data
+  NSData *keyData = [[NSData alloc] initWithBase64EncodedString:keyBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  NSData *ivData = [[NSData alloc] initWithBase64EncodedString:ivBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  
+  if (!keyData || keyData.length != 32) {
+    reject(@"ENCRYPT_FAILED", @"Invalid key length", nil);
+    return;
+  }
+  
+  if (!ivData || ivData.length != 16) {
+    reject(@"ENCRYPT_FAILED", @"Invalid IV length", nil);
+    return;
+  }
+  
+  // Convert text to NSData
+  NSData *textData = [textContent dataUsingEncoding:NSUTF8StringEncoding];
+  if (!textData || textData.length == 0) {
+    reject(@"ENCRYPT_FAILED", @"Failed to convert text to data", nil);
+    return;
+  }
+  
+  NSLog(@"Text data length: %lu", (unsigned long)textData.length);
+  
+  // Perform AES-256-CBC encryption
+  size_t outLength;
+  NSMutableData *encryptedData = [NSMutableData dataWithLength:textData.length + kCCBlockSizeAES128];
+  
+  CCCryptorStatus result = CCCrypt(
+    kCCEncrypt,
+    kCCAlgorithmAES,
+    kCCOptionPKCS7Padding,
+    keyData.bytes, keyData.length,
+    ivData.bytes,
+    textData.bytes, textData.length,
+    encryptedData.mutableBytes, encryptedData.length,
+    &outLength
+  );
+  
+  if (result == kCCSuccess) {
+    encryptedData.length = outLength;
+    
+    // Convert to base64 string
+    NSString *encryptedBase64 = [encryptedData base64EncodedStringWithOptions:0];
+    
+    NSLog(@"✅ Text encryption successful");
+    NSLog(@"Original size: %lu", (unsigned long)textData.length);
+    NSLog(@"Encrypted size: %lu", (unsigned long)encryptedData.length);
+    
+    resolve(encryptedBase64);
+  } else {
+    NSString *errorMessage = [NSString stringWithFormat:@"Encryption failed with status: %d", result];
+    NSLog(@"❌ %@", errorMessage);
+    reject(@"ENCRYPT_FAILED", errorMessage, nil);
+  }
+}
+
 @end
