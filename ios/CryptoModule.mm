@@ -36,6 +36,7 @@ RCT_REMAP_METHOD(decryptFile,
                  outputUri:(NSString *)outputUri
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
+                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
@@ -248,7 +249,7 @@ RCT_REMAP_METHOD(encryptDataStreaming,
   
   NSUInteger chunkSizeValue = [chunkSize unsignedIntegerValue];
   if (chunkSizeValue == 0) {
-    chunkSizeValue = 64 * 1024; // Default 64KB
+    chunkSizeValue = 1024 * 1024; // Default 1MB to match JavaScript
   }
   
   const size_t AES_BLOCK_SIZE = 16;
@@ -357,6 +358,7 @@ RCT_REMAP_METHOD(decryptTextContent,
                  encryptedContentBase64:(NSString *)encryptedContentBase64
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
+                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
@@ -425,6 +427,7 @@ RCT_REMAP_METHOD(encryptTextContent,
                  textContent:(NSString *)textContent
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
+                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {

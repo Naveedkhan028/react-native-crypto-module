@@ -1,4 +1,3 @@
-
 package com.cryptomodule;
 import android.util.Log;
 import android.util.Base64;
@@ -195,7 +194,7 @@ public class CryptoModule extends ReactContextBaseJavaModule {
             }
             
             if (chunkSize <= 0) {
-                chunkSize = 64 * 1024; // Default 64KB
+                chunkSize = 1024 * 1024; // Default 1MB to match JavaScript
             }
             
             final int AES_BLOCK_SIZE = 16;
