@@ -47,13 +47,17 @@ public class CryptoModule extends ReactContextBaseJavaModule {
     }
     
     @ReactMethod
-    public void decryptFile(String inputUri, String outputUri, String keyBase64, String ivBase64, Promise promise) {
+    public void decryptFile(String inputUri, String outputUri, String keyBase64, String ivBase64, Integer chunkSize, Promise promise) {
         try {
             Log.d(TAG, "=== NATIVE MODULE DEBUG ===");
             Log.d(TAG, "inputUri: " + inputUri);
             Log.d(TAG, "outputUri: " + outputUri);
             Log.d(TAG, "keyBase64 length: " + keyBase64.length());
             Log.d(TAG, "ivBase64 length: " + ivBase64.length());
+            Log.d(TAG, "chunkSize: " + (chunkSize != null ? chunkSize : "default"));
+            
+            // Use default chunk size if not provided
+            int actualChunkSize = chunkSize != null ? chunkSize : 64 * 1024; // Default 64KB
             
             // Convert file URIs to local paths
             String inputPath = convertFileUriToPath(inputUri);
@@ -175,7 +179,7 @@ public class CryptoModule extends ReactContextBaseJavaModule {
         }
     }
     @ReactMethod
-    public void encryptDataStreaming(String inputDataBase64, String keyBase64, String ivBase64, int chunkSize, Promise promise) {
+    public void encryptDataStreaming(String inputDataBase64, String keyBase64, String ivBase64, Integer chunkSize, Promise promise) {
         try {
             Log.d(TAG, "=== STREAMING ENCRYPTION START ===");
             
@@ -194,8 +198,10 @@ public class CryptoModule extends ReactContextBaseJavaModule {
                 return;
             }
             
-            if (chunkSize <= 0) {
-                chunkSize = 64 * 1024; // Default 64KB
+            int actualChunkSize = chunkSize != null ? chunkSize : 64 * 1024; // Default 64KB
+            
+            if (actualChunkSize <= 0) {
+                actualChunkSize = 64 * 1024; // Default 64KB
             }
             
             final int AES_BLOCK_SIZE = 16;
@@ -267,9 +273,10 @@ public class CryptoModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void encryptTextContent(String textContent, String keyBase64, String ivBase64, Promise promise) {
+    public void encryptTextContent(String textContent, String keyBase64, String ivBase64, Integer chunkSize, Promise promise) {
         try {
             Log.d(TAG, "=== TEXT ENCRYPTION START ===");
+            Log.d(TAG, "chunkSize: " + (chunkSize != null ? chunkSize : "default"));
             
             if (textContent == null || textContent.isEmpty()) {
                 promise.reject("ENCRYPT_FAILED", "Invalid text content");
@@ -320,9 +327,10 @@ public class CryptoModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void decryptTextContent(String encryptedContentBase64, String keyBase64, String ivBase64, Promise promise) {
+    public void decryptTextContent(String encryptedContentBase64, String keyBase64, String ivBase64, Integer chunkSize, Promise promise) {
         try {
             Log.d(TAG, "=== TEXT DECRYPTION START ===");
+            Log.d(TAG, "chunkSize: " + (chunkSize != null ? chunkSize : "default"));
             
             if (encryptedContentBase64 == null || encryptedContentBase64.isEmpty()) {
                 promise.reject("DECRYPT_FAILED", "Invalid encrypted content");

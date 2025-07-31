@@ -36,6 +36,7 @@ RCT_REMAP_METHOD(decryptFile,
                  outputUri:(NSString *)outputUri
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
+                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
@@ -44,6 +45,7 @@ RCT_REMAP_METHOD(decryptFile,
   NSLog(@"outputUri: %@", outputUri);
   NSLog(@"keyBase64 length: %lu", (unsigned long)keyBase64.length);
   NSLog(@"ivBase64 length: %lu", (unsigned long)ivBase64.length);
+  NSLog(@"chunkSize: %@", chunkSize);
   
   // Convert file URIs to local paths
   NSString *inputPath = [self convertFileUriToPath:inputUri];
@@ -357,10 +359,12 @@ RCT_REMAP_METHOD(decryptTextContent,
                  encryptedContentBase64:(NSString *)encryptedContentBase64
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
+                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
   NSLog(@"=== TEXT DECRYPTION START ===");
+  NSLog(@"chunkSize: %@", chunkSize);
   
   if (!encryptedContentBase64 || encryptedContentBase64.length == 0) {
     reject(@"DECRYPT_FAILED", @"Invalid encrypted content", nil);
@@ -425,10 +429,12 @@ RCT_REMAP_METHOD(encryptTextContent,
                  textContent:(NSString *)textContent
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
+                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
   NSLog(@"=== TEXT ENCRYPTION START ===");
+  NSLog(@"chunkSize: %@", chunkSize);
   
   if (!textContent || textContent.length == 0) {
     reject(@"ENCRYPT_FAILED", @"Invalid text content", nil);
