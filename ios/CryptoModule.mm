@@ -36,7 +36,6 @@ RCT_REMAP_METHOD(decryptFile,
                  outputUri:(NSString *)outputUri
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
-                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
