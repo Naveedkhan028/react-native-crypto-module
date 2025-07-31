@@ -357,12 +357,10 @@ RCT_REMAP_METHOD(decryptTextContent,
                  encryptedContentBase64:(NSString *)encryptedContentBase64
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
-                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
   NSLog(@"=== TEXT DECRYPTION START ===");
-  NSLog(@"chunkSize: %@", chunkSize);
   
   if (!encryptedContentBase64 || encryptedContentBase64.length == 0) {
     reject(@"DECRYPT_FAILED", @"Invalid encrypted content", nil);
@@ -427,12 +425,10 @@ RCT_REMAP_METHOD(encryptTextContent,
                  textContent:(NSString *)textContent
                  keyBase64:(NSString *)keyBase64
                  ivBase64:(NSString *)ivBase64
-                 chunkSize:(NSNumber *)chunkSize
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
   NSLog(@"=== TEXT ENCRYPTION START ===");
-  NSLog(@"chunkSize: %@", chunkSize);
   
   if (!textContent || textContent.length == 0) {
     reject(@"ENCRYPT_FAILED", @"Invalid text content", nil);
@@ -494,7 +490,5 @@ RCT_REMAP_METHOD(encryptTextContent,
     reject(@"ENCRYPT_FAILED", errorMessage, nil);
   }
 }
-
-// Methods removed - using the main methods with chunkSize parameter instead
 
 @end

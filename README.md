@@ -155,7 +155,7 @@ try {
 
 ### File Operations
 
-#### `decryptFile(inputUri, outputUri, keyBase64, ivBase64, chunkSize?)`
+#### `decryptFile(inputUri, outputUri, keyBase64, ivBase64)`
 
 Decrypts a file using AES-256-CBC.
 
@@ -164,33 +164,22 @@ Decrypts a file using AES-256-CBC.
 - `outputUri` (string): Path where the decrypted file will be saved
 - `keyBase64` (string): Base64 encoded 32-byte AES key
 - `ivBase64` (string): Base64 encoded 16-byte initialization vector
-- `chunkSize` (number, optional): Size of each chunk in bytes for streaming operations (default: 65536)
 
 **Returns:** `Promise<string>` - The output URI on success
 
 **Example:**
 ```javascript
-// With default chunkSize
 const result = await CryptoModule.decryptFile(
   'file:///storage/encrypted.dat',
   'file:///storage/decrypted.txt',
   'your-base64-key',
   'your-base64-iv'
 );
-
-// With custom chunkSize
-const result = await CryptoModule.decryptFile(
-  'file:///storage/encrypted.dat',
-  'file:///storage/decrypted.txt',
-  'your-base64-key',
-  'your-base64-iv',
-  32 * 1024 // 32KB chunks
-);
 ```
 
 ### Text Operations
 
-#### `decryptTextContent(encryptedContentBase64, keyBase64, ivBase64, chunkSize?)`
+#### `decryptTextContent(encryptedContentBase64, keyBase64, ivBase64)`
 
 Decrypts encrypted text content.
 
@@ -198,61 +187,21 @@ Decrypts encrypted text content.
 - `encryptedContentBase64` (string): Base64 encoded encrypted text
 - `keyBase64` (string): Base64 encoded 32-byte AES key
 - `ivBase64` (string): Base64 encoded 16-byte initialization vector
-- `chunkSize` (number, optional): Size of each chunk in bytes for streaming operations (default: 65536)
 
 **Returns:** `Promise<string>` - The decrypted text content
 
 **Example:**
 ```javascript
-// With default chunkSize
 const decrypted = await CryptoModule.decryptTextContent(
   'base64EncryptedText',
   'your-base64-key',
   'your-base64-iv'
-);
-
-// With custom chunkSize
-const decrypted = await CryptoModule.decryptTextContent(
-  'base64EncryptedText',
-  'your-base64-key',
-  'your-base64-iv',
-  16 * 1024 // 16KB chunks
-);
-```
-
-#### `encryptTextContent(textContent, keyBase64, ivBase64, chunkSize?)`
-
-Encrypts text content using AES-256-CBC.
-
-**Parameters:**
-- `textContent` (string): Plain text content to encrypt
-- `keyBase64` (string): Base64 encoded 32-byte AES key
-- `ivBase64` (string): Base64 encoded 16-byte initialization vector
-- `chunkSize` (number, optional): Size of each chunk in bytes for streaming operations (default: 65536)
-
-**Returns:** `Promise<string>` - Base64 encoded encrypted text
-
-**Example:**
-```javascript
-// With default chunkSize
-const encrypted = await CryptoModule.encryptTextContent(
-  'Hello, World!',
-  'your-base64-key',
-  'your-base64-iv'
-);
-
-// With custom chunkSize
-const encrypted = await CryptoModule.encryptTextContent(
-  'Hello, World!',
-  'your-base64-key',
-  'your-base64-iv',
-  8 * 1024 // 8KB chunks
 );
 ```
 
 ### Streaming Operations
 
-#### `encryptDataStreaming(inputDataBase64, keyBase64, ivBase64, chunkSize?)`
+#### `encryptDataStreaming(inputDataBase64, keyBase64, ivBase64, chunkSize)`
 
 Encrypts large data using streaming approach for memory efficiency.
 
@@ -260,7 +209,7 @@ Encrypts large data using streaming approach for memory efficiency.
 - `inputDataBase64` (string): Base64 encoded input data
 - `keyBase64` (string): Base64 encoded 32-byte AES key
 - `ivBase64` (string): Base64 encoded 16-byte initialization vector
-- `chunkSize` (number, optional): Size of each chunk in bytes (default: 65536)
+- `chunkSize` (number): Size of each chunk in bytes (default: 65536)
 
 **Returns:** `Promise<Object>` - Result object with encrypted chunks
 
@@ -369,12 +318,6 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 ---
 
 ## Changelog
-
-### v2.1.0
-- ✨ Added optional `chunkSize` parameter to all functions
-- 🔧 Updated default chunk size to 64KB for better mobile performance
-- 📚 Updated documentation with new parameter examples
-- ✅ Added comprehensive test suite for chunkSize parameter
 
 ### v2.0.0
 - ✨ Added streaming encryption support
