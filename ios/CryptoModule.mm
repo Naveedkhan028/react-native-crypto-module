@@ -510,7 +510,7 @@ RCT_REMAP_METHOD(encryptTextContent,
   }
 }
 
-// ✅ ADD: Streaming decryption method
+// ✅ COMPLETE FIXED: Streaming decryption method with proper casting
 RCT_REMAP_METHOD(decryptFileWithStreaming,
                  inputUri:(NSString *)inputUri
                  outputUri:(NSString *)outputUri
@@ -544,7 +544,9 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
     
     // Simple download implementation
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
-    [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    if (token && token.length > 0) {
+      [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    }
     
     NSError *downloadError = nil;
     NSData *downloadedData = [NSURLConnection sendSynchronousRequest:request returningResponse:nil error:&downloadError];
@@ -629,8 +631,21 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
   }
   
   NSUInteger bufferSize = chunkSizeValue + kCCBlockSizeAES128;
-  uint8_t *inputBuffer = malloc(bufferSize);
-  uint8_t *outputBuffer = malloc(bufferSize);
+  
+  // ✅ FIXED: Add explicit cast for malloc
+  uint8_t *inputBuffer = (uint8_t *)malloc(bufferSize);
+  uint8_t *outputBuffer = (uint8_t *)malloc(bufferSize);
+  
+  // ✅ Add null checks for safety
+  if (!inputBuffer || !outputBuffer) {
+    if (inputBuffer) free(inputBuffer);
+    if (outputBuffer) free(outputBuffer);
+    CCCryptorRelease(cryptor);
+    [inputStream close];
+    [outputStream close];
+    reject(@"DECRYPT_FAILED", @"Memory allocation failed", nil);
+    return;
+  }
   
   NSDictionary *attrs = [fileManager attributesOfItemAtPath:inputPath error:nil];
   unsigned long long totalBytes = [attrs[NSFileSize] unsignedLongLongValue];
@@ -651,14 +666,48 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
       size_t outputLength = 0;
       
       if (isLastChunk) {
-        // ✅ Final chunk - handle padding removal
+        // ✅ Final chunk - need to process remaining data first, then finalize
+        if (bytesRead > 0) {
+          // First update with remaining data
+          status = CCCryptorUpdate(
+            cryptor,
+            inputBuffer,
+            bytesRead,
+            outputBuffer,
+            bufferSize,
+            &outputLength
+          );
+          
+          if (status != kCCSuccess) {
+            CCCryptorRelease(cryptor);
+            free(inputBuffer);
+            free(outputBuffer);
+            [inputStream close];
+            [outputStream close];
+            reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Final update failed with status: %d", status], nil);
+            return;
+          }
+          
+          if (outputLength > 0) {
+            [outputStream write:outputBuffer maxLength:outputLength];
+          }
+        }
+        
+        // Then finalize to handle padding
+        size_t finalOutputLength = 0;
         status = CCCryptorFinal(
           cryptor,
           outputBuffer,
           bufferSize,
-          &outputLength
+          &finalOutputLength
         );
-        NSLog(@"Final chunk decrypted: %zu bytes", outputLength);
+        
+        NSLog(@"Final chunk processed: %zu bytes, final: %zu bytes", outputLength, finalOutputLength);
+        
+        if (finalOutputLength > 0) {
+          [outputStream write:outputBuffer maxLength:finalOutputLength];
+        }
+        
       } else {
         // ✅ Intermediate chunk - no padding
         status = CCCryptorUpdate(
@@ -670,6 +719,10 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
           &outputLength
         );
         NSLog(@"Intermediate chunk decrypted: %zu bytes", outputLength);
+        
+        if (outputLength > 0) {
+          [outputStream write:outputBuffer maxLength:outputLength];
+        }
       }
       
       if (status != kCCSuccess) {
@@ -680,10 +733,6 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
         [outputStream close];
         reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Decryption failed with status: %d", status], nil);
         return;
-      }
-      
-      if (outputLength > 0) {
-        [outputStream write:outputBuffer maxLength:outputLength];
       }
     }
     

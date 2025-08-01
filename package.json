@@ -1,6 +1,6 @@
 {
   "name": "react-native-crypto-module",
-  "version": "2.0.8",
+  "version": "2.0.9",
   "description": "A React Native module for AES-256-CBC file decryption on iOS and Android",
   "main": "index.js",
   "types": "src/index.ts",
