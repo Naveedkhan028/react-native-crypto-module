@@ -40,11 +40,15 @@ RCT_REMAP_METHOD(decryptFile,
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
-  NSLog(@"=== NATIVE MODULE DEBUG ===");
+  NSUInteger chunkSizeValue = [chunkSize unsignedIntegerValue];
+  if (chunkSizeValue == 0) {
+    chunkSizeValue = 1024 * 1024; // Default 1MB
+  }
+  
+  NSLog(@"=== DECRYPT FILE START ===");
   NSLog(@"inputUri: %@", inputUri);
   NSLog(@"outputUri: %@", outputUri);
-  NSLog(@"keyBase64 length: %lu", (unsigned long)keyBase64.length);
-  NSLog(@"ivBase64 length: %lu", (unsigned long)ivBase64.length);
+  NSLog(@"chunkSize: %lu", (unsigned long)chunkSizeValue);
   
   // Convert file URIs to local paths
   NSString *inputPath = [self convertFileUriToPath:inputUri];
@@ -362,7 +366,13 @@ RCT_REMAP_METHOD(decryptTextContent,
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
-  NSLog(@"=== TEXT DECRYPTION START ===");
+  NSUInteger chunkSizeValue = [chunkSize unsignedIntegerValue];
+  if (chunkSizeValue == 0) {
+    chunkSizeValue = 1024 * 1024; // Default 1MB
+  }
+  
+  NSLog(@"=== DECRYPT TEXT START ===");
+  NSLog(@"chunkSize: %lu", (unsigned long)chunkSizeValue);
   
   if (!encryptedContentBase64 || encryptedContentBase64.length == 0) {
     reject(@"DECRYPT_FAILED", @"Invalid encrypted content", nil);
@@ -431,7 +441,13 @@ RCT_REMAP_METHOD(encryptTextContent,
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
-  NSLog(@"=== TEXT ENCRYPTION START ===");
+  NSUInteger chunkSizeValue = [chunkSize unsignedIntegerValue];
+  if (chunkSizeValue == 0) {
+    chunkSizeValue = 1024 * 1024; // Default 1MB
+  }
+  
+  NSLog(@"=== ENCRYPT TEXT START ===");
+  NSLog(@"chunkSize: %lu", (unsigned long)chunkSizeValue);
   
   if (!textContent || textContent.length == 0) {
     reject(@"ENCRYPT_FAILED", @"Invalid text content", nil);
@@ -494,4 +510,216 @@ RCT_REMAP_METHOD(encryptTextContent,
   }
 }
 
+// ✅ ADD: Streaming decryption method
+RCT_REMAP_METHOD(decryptFileWithStreaming,
+                 inputUri:(NSString *)inputUri
+                 outputUri:(NSString *)outputUri
+                 keyBase64:(NSString *)keyBase64
+                 ivBase64:(NSString *)ivBase64
+                 token:(NSString *)token
+                 chunkSize:(NSNumber *)chunkSize
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSUInteger chunkSizeValue = [chunkSize unsignedIntegerValue];
+  if (chunkSizeValue == 0) {
+    chunkSizeValue = 1024 * 1024; // Default 1MB
+  }
+  
+  NSLog(@"=== STREAMING DECRYPTION START ===");
+  NSLog(@"inputUri: %@", inputUri);
+  NSLog(@"outputUri: %@", outputUri);
+  NSLog(@"chunkSize: %lu", (unsigned long)chunkSizeValue);
+  
+  // Convert file URIs to local paths
+  NSString *inputPath = [self convertFileUriToPath:inputUri];
+  NSString *outputPath = [self convertFileUriToPath:outputUri];
+  
+  // ✅ Download file first if it's HTTP URL
+  if ([inputUri hasPrefix:@"http"]) {
+    NSLog(@"Downloading file from: %@", inputUri);
+    
+    // Create temp file for download
+    NSString *tempPath = [outputPath stringByAppendingString:@"_temp_encrypted"];
+    
+    // Simple download implementation
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
+    [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    
+    NSError *downloadError = nil;
+    NSData *downloadedData = [NSURLConnection sendSynchronousRequest:request returningResponse:nil error:&downloadError];
+    
+    if (downloadError) {
+      NSLog(@"Download failed: %@", downloadError.localizedDescription);
+      reject(@"DOWNLOAD_FAILED", [NSString stringWithFormat:@"Failed to download file: %@", downloadError.localizedDescription], nil);
+      return;
+    }
+    
+    BOOL writeSuccess = [downloadedData writeToFile:tempPath atomically:YES];
+    if (!writeSuccess) {
+      reject(@"DOWNLOAD_FAILED", @"Failed to write downloaded file", nil);
+      return;
+    }
+    
+    inputPath = tempPath;
+    NSLog(@"File downloaded to: %@", inputPath);
+  }
+  
+  // Validate inputs
+  if (!inputPath || inputPath.length == 0) {
+    reject(@"DECRYPT_FAILED", @"Invalid input path", nil);
+    return;
+  }
+  
+  // Check if input file exists
+  NSFileManager *fileManager = [NSFileManager defaultManager];
+  if (![fileManager fileExistsAtPath:inputPath]) {
+    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Input file does not exist: %@", inputPath], nil);
+    return;
+  }
+  
+  // Create output directory if needed
+  NSString *outputDir = [outputPath stringByDeletingLastPathComponent];
+  NSError *dirError = nil;
+  if (![fileManager createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:&dirError]) {
+    if (dirError) {
+      reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Failed to create output directory: %@", dirError.localizedDescription], nil);
+      return;
+    }
+  }
+  
+  // Convert base64 to data
+  NSData *keyData = [[NSData alloc] initWithBase64EncodedString:keyBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  NSData *ivData = [[NSData alloc] initWithBase64EncodedString:ivBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  
+  if (!keyData || keyData.length != 32) {
+    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Invalid key data length: %lu", (unsigned long)keyData.length], nil);
+    return;
+  }
+  
+  if (!ivData || ivData.length != 16) {
+    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Invalid IV data length: %lu", (unsigned long)ivData.length], nil);
+    return;
+  }
+  
+  // ✅ STREAMING DECRYPTION with proper padding handling
+  NSInputStream *inputStream = [NSInputStream inputStreamWithFileAtPath:inputPath];
+  NSOutputStream *outputStream = [NSOutputStream outputStreamToFileAtPath:outputPath append:NO];
+  
+  [inputStream open];
+  [outputStream open];
+  
+  // ✅ Create cryptor for streaming
+  CCCryptorRef cryptor;
+  CCCryptorStatus status = CCCryptorCreate(
+    kCCDecrypt,
+    kCCAlgorithmAES,
+    kCCOptionPKCS7Padding,
+    keyData.bytes,
+    keyData.length,
+    ivData.bytes,
+    &cryptor
+  );
+  
+  if (status != kCCSuccess) {
+    [inputStream close];
+    [outputStream close];
+    reject(@"DECRYPT_FAILED", @"Failed to create cryptor", nil);
+    return;
+  }
+  
+  NSUInteger bufferSize = chunkSizeValue + kCCBlockSizeAES128;
+  uint8_t *inputBuffer = malloc(bufferSize);
+  uint8_t *outputBuffer = malloc(bufferSize);
+  
+  NSDictionary *attrs = [fileManager attributesOfItemAtPath:inputPath error:nil];
+  unsigned long long totalBytes = [attrs[NSFileSize] unsignedLongLongValue];
+  unsigned long long processedBytes = 0;
+  
+  NSLog(@"Starting streaming decryption, total size: %llu", totalBytes);
+  
+  @try {
+    NSInteger bytesRead;
+    BOOL isLastChunk = NO;
+    
+    while ((bytesRead = [inputStream read:inputBuffer maxLength:chunkSizeValue]) > 0) {
+      processedBytes += bytesRead;
+      isLastChunk = (processedBytes >= totalBytes);
+      
+      NSLog(@"Processing chunk: %ld bytes, isLast: %d", (long)bytesRead, isLastChunk);
+      
+      size_t outputLength = 0;
+      
+      if (isLastChunk) {
+        // ✅ Final chunk - handle padding removal
+        status = CCCryptorFinal(
+          cryptor,
+          outputBuffer,
+          bufferSize,
+          &outputLength
+        );
+        NSLog(@"Final chunk decrypted: %zu bytes", outputLength);
+      } else {
+        // ✅ Intermediate chunk - no padding
+        status = CCCryptorUpdate(
+          cryptor,
+          inputBuffer,
+          bytesRead,
+          outputBuffer,
+          bufferSize,
+          &outputLength
+        );
+        NSLog(@"Intermediate chunk decrypted: %zu bytes", outputLength);
+      }
+      
+      if (status != kCCSuccess) {
+        CCCryptorRelease(cryptor);
+        free(inputBuffer);
+        free(outputBuffer);
+        [inputStream close];
+        [outputStream close];
+        reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Decryption failed with status: %d", status], nil);
+        return;
+      }
+      
+      if (outputLength > 0) {
+        [outputStream write:outputBuffer maxLength:outputLength];
+      }
+    }
+    
+    CCCryptorRelease(cryptor);
+    free(inputBuffer);
+    free(outputBuffer);
+    [inputStream close];
+    [outputStream close];
+    
+    // ✅ Clean up temp file if we downloaded
+    if ([inputUri hasPrefix:@"http"]) {
+      [fileManager removeItemAtPath:inputPath error:nil];
+    }
+    
+    NSLog(@"✅ Streaming decryption completed");
+    
+    // Verify output file
+    if ([fileManager fileExistsAtPath:outputPath]) {
+      NSDictionary *outputAttrs = [fileManager attributesOfItemAtPath:outputPath error:nil];
+      
+      resolve(@{
+        @"success": @YES,
+        @"localPath": outputUri,
+        @"size": outputAttrs[NSFileSize]
+      });
+    } else {
+      reject(@"DECRYPT_FAILED", @"Output file verification failed", nil);
+    }
+    
+  } @catch (NSException *exception) {
+    CCCryptorRelease(cryptor);
+    free(inputBuffer);
+    free(outputBuffer);
+    [inputStream close];
+    [outputStream close];
+    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Exception during decryption: %@", exception.reason], nil);
+  }
+}
 @end

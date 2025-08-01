@@ -1,7 +1,7 @@
 {
   "name": "react-native-crypto-module",
-  "version": "2.1.0",
-  "description": "A React Native module for AES-256-CBC file decryption on iOS and Android with consistent chunk size support",
+  "version": "2.0.8",
+  "description": "A React Native module for AES-256-CBC file decryption on iOS and Android",
   "main": "index.js",
   "types": "src/index.ts",
   "scripts": {
@@ -33,5 +33,7 @@
   },
   "bugs": {
     "url": "https://github.com/Naveedkhan028/react-native-crypto-module/issues"
+  },
+  "dependencies": {
   }
 }
