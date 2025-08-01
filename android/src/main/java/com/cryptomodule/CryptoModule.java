@@ -405,6 +405,7 @@ public class CryptoModule extends ReactContextBaseJavaModule {
             // ✅ Download file first if it's HTTP URL
             if (inputUri.startsWith("http")) {
                 Log.d(TAG, "Downloading file from: " + inputUri);
+                
                 // Create temp file for download
                 String tempPath = outputPath + "_temp_encrypted";
                 
@@ -529,6 +530,218 @@ public class CryptoModule extends ReactContextBaseJavaModule {
             }
             
             Log.d(TAG, "✅ Streaming decryption completed");
+            
+            // Verify output file
+            if (outputFile.exists()) {
+                WritableMap result = Arguments.createMap();
+                result.putBoolean("success", true);
+                result.putString("localPath", outputUri);
+                result.putDouble("size", outputFile.length());
+                
+                promise.resolve(result);
+            } else {
+                promise.reject("DECRYPT_FAILED", "Output file verification failed");
+            }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Streaming decryption failed: " + e.getMessage(), e);
+            promise.reject("DECRYPT_FAILED", "Streaming decryption failed: " + e.getMessage());
+        }
+    }
+    // ✅ UPDATED: Add progress callback support to Android
+    @ReactMethod
+    public void decryptFileWithStreaming(String inputUri, String outputUri, String keyBase64, String ivBase64, String token, int chunkSize, Callback progressCallback, Promise promise) {
+        try {
+            Log.d(TAG, "=== STREAMING DECRYPTION START ===");
+            Log.d(TAG, "inputUri: " + inputUri);
+            Log.d(TAG, "outputUri: " + outputUri);
+            Log.d(TAG, "chunkSize: " + chunkSize);
+            
+            // Set default chunk size if not provided
+            if (chunkSize <= 0) {
+                chunkSize = 1024 * 1024; // Default 1MB
+            }
+            
+            // Convert file URIs to local paths
+            String inputPath = convertFileUriToPath(inputUri);
+            String outputPath = convertFileUriToPath(outputUri);
+            
+            // Validate inputs
+            if (inputPath == null || inputPath.isEmpty()) {
+                promise.reject("DECRYPT_FAILED", "Invalid input path");
+                return;
+            }
+            
+            // ✅ Download file first if it's HTTP URL
+            if (inputUri.startsWith("http")) {
+                Log.d(TAG, "Downloading file from: " + inputUri);
+                
+                // ✅ Send download progress
+                if (progressCallback != null) {
+                    progressCallback.invoke(0, "downloading");
+                }
+                
+                // Create temp file for download
+                String tempPath = outputPath + "_temp_encrypted";
+                
+                // Simple download implementation
+                try {
+                    java.net.URL url = new java.net.URL(inputUri);
+                    java.net.HttpURLConnection connection = (java.net.HttpURLConnection) url.openConnection();
+                    connection.setRequestProperty("Authorization", "Bearer " + token);
+                    
+                    java.io.InputStream inputStream = connection.getInputStream();
+                    java.io.FileOutputStream outputStream = new java.io.FileOutputStream(tempPath);
+                    
+                    // ✅ Track download progress
+                    long totalSize = connection.getContentLength();
+                    long downloadedSize = 0;
+                    
+                    byte[] buffer = new byte[4096];
+                    int bytesRead;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        outputStream.write(buffer, 0, bytesRead);
+                        downloadedSize += bytesRead;
+                        
+                        // ✅ Send download progress (0-20%)
+                        if (progressCallback != null && totalSize > 0) {
+                            double progressPercent = ((double)downloadedSize / (double)totalSize) * 20.0;
+                            progressCallback.invoke(progressPercent, "downloading");
+                        }
+                    }
+                    
+                    inputStream.close();
+                    outputStream.close();
+                    connection.disconnect();
+                    
+                    inputPath = tempPath;
+                    Log.d(TAG, "File downloaded to: " + inputPath);
+                    
+                    // ✅ Send download complete progress
+                    if (progressCallback != null) {
+                        progressCallback.invoke(20, "download_complete");
+                    }
+                    
+                } catch (Exception downloadError) {
+                    Log.e(TAG, "Download failed: " + downloadError.getMessage());
+                    promise.reject("DOWNLOAD_FAILED", "Failed to download file: " + downloadError.getMessage());
+                    return;
+                }
+            }
+            
+            // Check if input file exists
+            File inputFile = new File(inputPath);
+            if (!inputFile.exists()) {
+                Log.e(TAG, "Input file does not exist at path: " + inputPath);
+                promise.reject("DECRYPT_FAILED", "Input file does not exist: " + inputPath);
+                return;
+            }
+            
+            // Create output directory if needed
+            File outputFile = new File(outputPath);
+            File outputDir = outputFile.getParentFile();
+            if (outputDir != null && !outputDir.exists()) {
+                if (!outputDir.mkdirs()) {
+                    promise.reject("DECRYPT_FAILED", "Failed to create output directory");
+                    return;
+                }
+            }
+            
+            // Convert base64 to bytes
+            byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
+            byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
+            
+            if (keyBytes.length != 32) {
+                promise.reject("DECRYPT_FAILED", "Invalid key data length: " + keyBytes.length);
+                return;
+            }
+            
+            if (ivBytes.length != 16) {
+                promise.reject("DECRYPT_FAILED", "Invalid IV data length: " + ivBytes.length);
+                return;
+            }
+            
+            // ✅ Send decryption start progress
+            if (progressCallback != null) {
+                progressCallback.invoke(25, "decryption_start");
+            }
+            
+            // ✅ STREAMING DECRYPTION with proper padding handling
+            SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+            IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+            
+            FileInputStream fis = new FileInputStream(inputFile);
+            FileOutputStream fos = new FileOutputStream(outputFile);
+            
+            // ✅ Create cipher in streaming mode
+            Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+            
+            byte[] inputBuffer = new byte[chunkSize + 16]; // Extra space for block alignment
+            byte[] outputBuffer = new byte[chunkSize + 16];
+            
+            long totalBytes = inputFile.length();
+            long processedBytes = 0;
+            
+            Log.d(TAG, "Starting streaming decryption, total size: " + totalBytes);
+            
+            int bytesRead;
+            boolean isFirstChunk = true;
+            boolean isLastChunk = false;
+            
+            while ((bytesRead = fis.read(inputBuffer)) != -1) {
+                processedBytes += bytesRead;
+                isLastChunk = (processedBytes >= totalBytes);
+                
+                Log.d(TAG, "Processing chunk: " + bytesRead + " bytes, isLast: " + isLastChunk);
+                
+                // ✅ Calculate and send progress (25-90%)
+                if (progressCallback != null && totalBytes > 0) {
+                    double progressPercent = 25.0 + ((double)processedBytes / (double)totalBytes) * 65.0;
+                    progressCallback.invoke(progressPercent, "decrypting");
+                }
+                
+                byte[] chunkToDecrypt = new byte[bytesRead];
+                System.arraycopy(inputBuffer, 0, chunkToDecrypt, 0, bytesRead);
+                
+                int outputLength;
+                
+                if (isLastChunk) {
+                    // ✅ Final chunk - handle padding removal
+                    outputLength = cipher.doFinal(chunkToDecrypt, 0, bytesRead, outputBuffer);
+                    Log.d(TAG, "Final chunk decrypted: " + outputLength + " bytes");
+                } else {
+                    // ✅ Intermediate chunk - no padding
+                    outputLength = cipher.update(chunkToDecrypt, 0, bytesRead, outputBuffer);
+                    Log.d(TAG, "Intermediate chunk decrypted: " + outputLength + " bytes");
+                }
+                
+                if (outputLength > 0) {
+                    fos.write(outputBuffer, 0, outputLength);
+                }
+                
+                isFirstChunk = false;
+            }
+            
+            fis.close();
+            fos.close();
+            
+            // ✅ Send processing progress
+            if (progressCallback != null) {
+                progressCallback.invoke(90, "processing");
+            }
+            
+            // ✅ Clean up temp file if we downloaded
+            if (inputUri.startsWith("http")) {
+                new File(inputPath).delete();
+            }
+            
+            Log.d(TAG, "✅ Streaming decryption completed");
+            
+            // ✅ Send completion progress
+            if (progressCallback != null) {
+                progressCallback.invoke(100, "complete");
+            }
             
             // Verify output file
             if (outputFile.exists()) {
