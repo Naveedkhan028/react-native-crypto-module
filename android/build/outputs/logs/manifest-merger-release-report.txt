@@ -1,0 +1,18 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml:2:1-5:12
+INJECTED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml:2:1-5:12
+	package
+		INJECTED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml
+	xmlns:android
+		ADDED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml:2:11-69
+application
+ADDED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml:3:5-4:19
+uses-sdk
+INJECTED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml
+INJECTED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml
+	android:targetSdkVersion
+		INJECTED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from /Users/navidahmad/Desktop/react-native-crypto-module/android/src/main/AndroidManifest.xml
