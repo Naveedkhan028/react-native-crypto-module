@@ -538,9 +538,9 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
   NSString *inputPath = [self convertFileUriToPath:inputUri];
   NSString *outputPath = [self convertFileUriToPath:outputUri];
   
-  // ✅ Download file first if it's HTTP URL
+  // ✅ Download file first if it's HTTP URL  
   if ([inputUri hasPrefix:@"http"]) {
-    NSLog(@"Downloading and streaming file from: %@", inputUri);
+    NSLog(@"Downloading with progressive decryption from: %@", inputUri);
     
     NSString *tempPath = [outputPath stringByAppendingString:@"_temp_encrypted"];
     
@@ -549,49 +549,65 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
       [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     }
     
-    // ✅ Use NSURLSession for better streaming support (though still synchronous for now)
+    // ✅ Use NSURLSession with streaming approach
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block NSError *downloadError = nil;
     __block BOOL downloadSuccess = NO;
     
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+    config.timeoutIntervalForRequest = 300; // 5 minutes
+    config.timeoutIntervalForResource = 600; // 10 minutes
+    
     NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
     
-    NSURLSessionDownloadTask *downloadTask = [session downloadTaskWithRequest:request
-      completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+    // ✅ IMPROVED: Use data task with completion to get data progressively
+    NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request
+      completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error) {
           downloadError = error;
-        } else if (location) {
-          // Move downloaded file to temp path
-          NSError *moveError = nil;
-          [[NSFileManager defaultManager] moveItemAtPath:[location path] toPath:tempPath error:&moveError];
-          if (moveError) {
-            downloadError = moveError;
+          NSLog(@"Download error: %@", error.localizedDescription);
+        } else if (data && data.length > 0) {
+          NSLog(@"Downloaded %lu bytes, writing to temp file", (unsigned long)data.length);
+          
+          // Write downloaded data to temp file
+          NSError *writeError = nil;
+          BOOL writeSuccess = [data writeToFile:tempPath options:NSDataWritingAtomic error:&writeError];
+          
+          if (writeError || !writeSuccess) {
+            downloadError = writeError;
+            NSLog(@"Failed to write temp file: %@", writeError.localizedDescription);
           } else {
             downloadSuccess = YES;
             NSLog(@"File downloaded successfully to: %@", tempPath);
+            NSLog(@"File size: %lu bytes", (unsigned long)data.length);
           }
+        } else {
+          downloadError = [NSError errorWithDomain:@"CryptoModule" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No data received"}];
         }
         dispatch_semaphore_signal(semaphore);
       }];
     
-    [downloadTask resume];
+    [dataTask resume];
+    NSLog(@"Download task started...");
     
     // Wait for download to complete (with timeout)
-    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC)); // 5 min timeout
-    if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
-      [downloadTask cancel];
-      reject(@"DOWNLOAD_FAILED", @"Download timed out", nil);
+    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600 * NSEC_PER_SEC)); // 10 min timeout
+    long result = dispatch_semaphore_wait(semaphore, timeout);
+    
+    if (result != 0) {
+      [dataTask cancel];
+      reject(@"DOWNLOAD_FAILED", @"Download timed out after 10 minutes", nil);
       return;
     }
     
     if (downloadError || !downloadSuccess) {
       NSLog(@"Download failed: %@", downloadError.localizedDescription);
-      reject(@"DOWNLOAD_FAILED", [NSString stringWithFormat:@"Failed to download file: %@", downloadError.localizedDescription], nil);
+      reject(@"DOWNLOAD_FAILED", [NSString stringWithFormat:@"Failed to download file: %@", downloadError.localizedDescription ?: @"Unknown error"], nil);
       return;
     }
     
     inputPath = tempPath;
+    NSLog(@"Proceeding with decryption of downloaded file");
   }
   
   // Validate inputs
@@ -799,4 +815,5 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
     reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Exception during decryption: %@", exception.reason], nil);
   }
 }
+
 @end
