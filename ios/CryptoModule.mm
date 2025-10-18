@@ -538,76 +538,226 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
   NSString *inputPath = [self convertFileUriToPath:inputUri];
   NSString *outputPath = [self convertFileUriToPath:outputUri];
   
-  // ✅ Download file first if it's HTTP URL  
+  // ✅ Convert base64 keys early for use in progressive streaming
+  NSData *keyData = [[NSData alloc] initWithBase64EncodedString:keyBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  NSData *ivData = [[NSData alloc] initWithBase64EncodedString:ivBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  
+  if (!keyData || keyData.length != 32) {
+    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Invalid key data length: %lu", (unsigned long)keyData.length], nil);
+    return;
+  }
+  
+  if (!ivData || ivData.length != 16) {
+    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Invalid IV data length: %lu", (unsigned long)ivData.length], nil);
+    return;
+  }
+  
+  // ✅ Download and decrypt progressively if it's HTTP URL using range requests
   if ([inputUri hasPrefix:@"http"]) {
-    NSLog(@"Downloading with progressive decryption from: %@", inputUri);
+    NSLog(@"🚀 Starting progressive streaming with range requests from: %@", inputUri);
     
-    NSString *tempPath = [outputPath stringByAppendingString:@"_temp_encrypted"];
+    // ✅ Create output stream immediately
+    NSOutputStream *outputStream = [NSOutputStream outputStreamToFileAtPath:outputPath append:NO];
+    [outputStream open];
     
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
-    if (token && token.length > 0) {
-      [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    // ✅ Create cryptor for progressive decryption
+    CCCryptorRef cryptor;
+    CCCryptorStatus status = CCCryptorCreate(
+      kCCDecrypt,
+      kCCAlgorithmAES,
+      kCCOptionPKCS7Padding,
+      keyData.bytes,
+      keyData.length,
+      ivData.bytes,
+      &cryptor
+    );
+    
+    if (status != kCCSuccess) {
+      [outputStream close];
+      reject(@"DECRYPT_FAILED", @"Failed to create cryptor", nil);
+      return;
     }
     
-    // ✅ Use NSURLSession with streaming approach
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    __block NSError *downloadError = nil;
-    __block BOOL downloadSuccess = NO;
+    NSLog(@"✅ Cryptor created, starting range-based download...");
     
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-    config.timeoutIntervalForRequest = 300; // 5 minutes
-    config.timeoutIntervalForResource = 600; // 10 minutes
+    // ✅ First, get file size with HEAD request
+    NSMutableURLRequest *headRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
+    headRequest.HTTPMethod = @"HEAD";
+    if (token && token.length > 0) {
+      [headRequest setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    }
     
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    dispatch_semaphore_t headSemaphore = dispatch_semaphore_create(0);
+    __block unsigned long long totalFileSize = 0;
+    __block NSError *headError = nil;
     
-    // ✅ IMPROVED: Use data task with completion to get data progressively
-    NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request
+    NSURLSession *headSession = [NSURLSession sharedSession];
+    NSURLSessionDataTask *headTask = [headSession dataTaskWithRequest:headRequest
       completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error) {
-          downloadError = error;
-          NSLog(@"Download error: %@", error.localizedDescription);
-        } else if (data && data.length > 0) {
-          NSLog(@"Downloaded %lu bytes, writing to temp file", (unsigned long)data.length);
-          
-          // Write downloaded data to temp file
-          NSError *writeError = nil;
-          BOOL writeSuccess = [data writeToFile:tempPath options:NSDataWritingAtomic error:&writeError];
-          
-          if (writeError || !writeSuccess) {
-            downloadError = writeError;
-            NSLog(@"Failed to write temp file: %@", writeError.localizedDescription);
-          } else {
-            downloadSuccess = YES;
-            NSLog(@"File downloaded successfully to: %@", tempPath);
-            NSLog(@"File size: %lu bytes", (unsigned long)data.length);
-          }
-        } else {
-          downloadError = [NSError errorWithDomain:@"CryptoModule" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No data received"}];
+          headError = error;
+        } else if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+          NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+          totalFileSize = [httpResponse.allHeaderFields[@"Content-Length"] unsignedLongLongValue];
+          NSLog(@"📦 Total file size: %llu bytes", totalFileSize);
         }
-        dispatch_semaphore_signal(semaphore);
+        dispatch_semaphore_signal(headSemaphore);
       }];
     
-    [dataTask resume];
-    NSLog(@"Download task started...");
+    [headTask resume];
+    dispatch_semaphore_wait(headSemaphore, DISPATCH_TIME_FOREVER);
     
-    // Wait for download to complete (with timeout)
-    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600 * NSEC_PER_SEC)); // 10 min timeout
-    long result = dispatch_semaphore_wait(semaphore, timeout);
-    
-    if (result != 0) {
-      [dataTask cancel];
-      reject(@"DOWNLOAD_FAILED", @"Download timed out after 10 minutes", nil);
+    if (headError || totalFileSize == 0) {
+      CCCryptorRelease(cryptor);
+      [outputStream close];
+      reject(@"DOWNLOAD_FAILED", @"Failed to get file size", nil);
       return;
     }
     
-    if (downloadError || !downloadSuccess) {
-      NSLog(@"Download failed: %@", downloadError.localizedDescription);
-      reject(@"DOWNLOAD_FAILED", [NSString stringWithFormat:@"Failed to download file: %@", downloadError.localizedDescription ?: @"Unknown error"], nil);
+    // ✅ Download and decrypt in chunks using range requests
+    const NSUInteger DOWNLOAD_CHUNK_SIZE = chunkSizeValue; // Use same chunk size
+    NSUInteger bufferSize = chunkSizeValue + kCCBlockSizeAES128;
+    uint8_t *outputBuffer = (uint8_t *)malloc(bufferSize);
+    
+    if (!outputBuffer) {
+      CCCryptorRelease(cryptor);
+      [outputStream close];
+      reject(@"DECRYPT_FAILED", @"Memory allocation failed", nil);
       return;
     }
     
-    inputPath = tempPath;
-    NSLog(@"Proceeding with decryption of downloaded file");
+    unsigned long long downloadedBytes = 0;
+    BOOL hasError = NO;
+    NSString *errorMessage = nil;
+    
+    NSLog(@"📥 Starting chunked download and decryption...");
+    
+    while (downloadedBytes < totalFileSize && !hasError) {
+      @autoreleasepool {
+        unsigned long long rangeStart = downloadedBytes;
+        unsigned long long rangeEnd = MIN(downloadedBytes + DOWNLOAD_CHUNK_SIZE - 1, totalFileSize - 1);
+        BOOL isLastChunk = (rangeEnd >= totalFileSize - 1);
+        
+        NSLog(@"📦 Requesting bytes %llu-%llu (chunk %llu/%llu)", 
+              rangeStart, rangeEnd, 
+              (downloadedBytes / DOWNLOAD_CHUNK_SIZE) + 1,
+              (totalFileSize + DOWNLOAD_CHUNK_SIZE - 1) / DOWNLOAD_CHUNK_SIZE);
+        
+        // Create range request
+        NSMutableURLRequest *rangeRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
+        if (token && token.length > 0) {
+          [rangeRequest setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+        }
+        [rangeRequest setValue:[NSString stringWithFormat:@"bytes=%llu-%llu", rangeStart, rangeEnd] 
+            forHTTPHeaderField:@"Range"];
+        
+        dispatch_semaphore_t chunkSemaphore = dispatch_semaphore_create(0);
+        __block NSData *chunkData = nil;
+        __block NSError *chunkError = nil;
+        
+        NSURLSession *chunkSession = [NSURLSession sharedSession];
+        NSURLSessionDataTask *chunkTask = [chunkSession dataTaskWithRequest:rangeRequest
+          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            if (error) {
+              chunkError = error;
+            } else {
+              chunkData = data;
+            }
+            dispatch_semaphore_signal(chunkSemaphore);
+          }];
+        
+        [chunkTask resume];
+        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC));
+        if (dispatch_semaphore_wait(chunkSemaphore, timeout) != 0) {
+          hasError = YES;
+          errorMessage = @"Chunk download timed out";
+          break;
+        }
+        
+        if (chunkError || !chunkData) {
+          hasError = YES;
+          errorMessage = chunkError.localizedDescription ?: @"Failed to download chunk";
+          break;
+        }
+        
+        NSLog(@"✅ Downloaded chunk: %lu bytes", (unsigned long)chunkData.length);
+        
+        // ✅ Decrypt the chunk immediately
+        size_t outputLength = 0;
+        
+        if (isLastChunk) {
+          // Final chunk - use Update + Final
+          status = CCCryptorUpdate(
+            cryptor,
+            chunkData.bytes,
+            chunkData.length,
+            outputBuffer,
+            bufferSize,
+            &outputLength
+          );
+          
+          if (status == kCCSuccess && outputLength > 0) {
+            [outputStream write:outputBuffer maxLength:outputLength];
+            NSLog(@"✅ Decrypted and wrote: %zu bytes", outputLength);
+          }
+          
+          // Finalize
+          size_t finalLength = 0;
+          status = CCCryptorFinal(cryptor, outputBuffer, bufferSize, &finalLength);
+          if (status == kCCSuccess && finalLength > 0) {
+            [outputStream write:outputBuffer maxLength:finalLength];
+            NSLog(@"✅ Final decryption wrote: %zu bytes", finalLength);
+          }
+        } else {
+          // Intermediate chunk - use Update only
+          status = CCCryptorUpdate(
+            cryptor,
+            chunkData.bytes,
+            chunkData.length,
+            outputBuffer,
+            bufferSize,
+            &outputLength
+          );
+          
+          if (status == kCCSuccess && outputLength > 0) {
+            [outputStream write:outputBuffer maxLength:outputLength];
+            NSLog(@"✅ Decrypted and wrote: %zu bytes", outputLength);
+          }
+        }
+        
+        if (status != kCCSuccess) {
+          hasError = YES;
+          errorMessage = [NSString stringWithFormat:@"Decryption failed with status: %d", status];
+          break;
+        }
+        
+        downloadedBytes += chunkData.length;
+      }
+    }
+    
+    free(outputBuffer);
+    CCCryptorRelease(cryptor);
+    [outputStream close];
+    
+    if (hasError) {
+      reject(@"DECRYPT_FAILED", errorMessage ?: @"Progressive streaming failed", nil);
+      return;
+    }
+    
+    NSLog(@"✅ Progressive streaming completed successfully!");
+    
+    // Verify output file
+    if ([fileManager fileExistsAtPath:outputPath]) {
+      NSDictionary *outputAttrs = [fileManager attributesOfItemAtPath:outputPath error:nil];
+      resolve(@{
+        @"success": @YES,
+        @"localPath": outputUri,
+        @"size": outputAttrs[NSFileSize]
+      });
+    } else {
+      reject(@"DECRYPT_FAILED", @"Output file verification failed", nil);
+    }
+    return;
   }
   
   // Validate inputs
@@ -627,19 +777,11 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
     }
   }
   
-  // Convert base64 to data
-  NSData *keyData = [[NSData alloc] initWithBase64EncodedString:keyBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
-  NSData *ivData = [[NSData alloc] initWithBase64EncodedString:ivBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  // ✅ keyData and ivData already converted above - no need to reconvert
   
-  if (!keyData || keyData.length != 32) {
-    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Invalid key data length: %lu", (unsigned long)keyData.length], nil);
-    return;
-  }
-  
-  if (!ivData || ivData.length != 16) {
-    reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Invalid IV data length: %lu", (unsigned long)ivData.length], nil);
-    return;
-  }
+  // ✅ Create output file immediately so JS polling can detect activity
+  [@"" writeToFile:outputPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  NSLog(@"✅ Created empty output file for streaming: %@", outputPath);
   
   // ✅ FIXED: Use streaming approach with proper padding
   NSInputStream *inputStream = [NSInputStream inputStreamWithFileAtPath:inputPath];
