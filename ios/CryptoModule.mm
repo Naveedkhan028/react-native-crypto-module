@@ -540,7 +540,7 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
   
   // ✅ Download file first if it's HTTP URL
   if ([inputUri hasPrefix:@"http"]) {
-    NSLog(@"Downloading file from: %@", inputUri);
+    NSLog(@"Downloading and streaming file from: %@", inputUri);
     
     NSString *tempPath = [outputPath stringByAppendingString:@"_temp_encrypted"];
     
@@ -549,23 +549,49 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
       [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     }
     
-    NSError *downloadError = nil;
-    NSData *downloadedData = [NSURLConnection sendSynchronousRequest:request returningResponse:nil error:&downloadError];
+    // ✅ Use NSURLSession for better streaming support (though still synchronous for now)
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSError *downloadError = nil;
+    __block BOOL downloadSuccess = NO;
     
-    if (downloadError) {
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    
+    NSURLSessionDownloadTask *downloadTask = [session downloadTaskWithRequest:request
+      completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+        if (error) {
+          downloadError = error;
+        } else if (location) {
+          // Move downloaded file to temp path
+          NSError *moveError = nil;
+          [[NSFileManager defaultManager] moveItemAtPath:[location path] toPath:tempPath error:&moveError];
+          if (moveError) {
+            downloadError = moveError;
+          } else {
+            downloadSuccess = YES;
+            NSLog(@"File downloaded successfully to: %@", tempPath);
+          }
+        }
+        dispatch_semaphore_signal(semaphore);
+      }];
+    
+    [downloadTask resume];
+    
+    // Wait for download to complete (with timeout)
+    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC)); // 5 min timeout
+    if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
+      [downloadTask cancel];
+      reject(@"DOWNLOAD_FAILED", @"Download timed out", nil);
+      return;
+    }
+    
+    if (downloadError || !downloadSuccess) {
       NSLog(@"Download failed: %@", downloadError.localizedDescription);
       reject(@"DOWNLOAD_FAILED", [NSString stringWithFormat:@"Failed to download file: %@", downloadError.localizedDescription], nil);
       return;
     }
     
-    BOOL writeSuccess = [downloadedData writeToFile:tempPath atomically:YES];
-    if (!writeSuccess) {
-      reject(@"DOWNLOAD_FAILED", @"Failed to write downloaded file", nil);
-      return;
-    }
-    
     inputPath = tempPath;
-    NSLog(@"File downloaded to: %@", inputPath);
   }
   
   // Validate inputs
