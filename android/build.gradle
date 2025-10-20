@@ -31,4 +31,5 @@ repositories {
 
 dependencies {
     compileOnly 'com.facebook.react:react-native:+'
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
 }

@@ -9,23 +9,183 @@ import com.facebook.react.bridge.Callback;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
 import javax.crypto.Cipher;
+import javax.crypto.CipherOutputStream;
 import javax.crypto.spec.SecretKeySpec;
 import javax.crypto.spec.IvParameterSpec;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.Arguments;
+import fi.iki.elonen.NanoHTTPD;
 
 public class CryptoModule extends ReactContextBaseJavaModule {
     private static final String TAG = "CryptoModule";
     private static final String TRANSFORMATION = "AES/CBC/PKCS5Padding";
+    private StreamingHTTPServer httpServer;
     
     public CryptoModule(ReactApplicationContext reactContext) {
         super(reactContext);
+        
+        // Start HTTP server on initialization
+        try {
+            httpServer = new StreamingHTTPServer(0); // 0 = random available port
+            httpServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false);
+            Log.d(TAG, "🌐 NanoHTTPD server started on port: " + httpServer.getListeningPort());
+        } catch (IOException e) {
+            Log.e(TAG, "❌ Failed to start HTTP server: " + e.getMessage());
+        }
+    }
+    
+    @Override
+    public void onCatalystInstanceDestroy() {
+        super.onCatalystInstanceDestroy();
+        if (httpServer != null) {
+            httpServer.stop();
+            Log.d(TAG, "🛑 HTTP server stopped");
+        }
+    }
+    
+    // ✅ Inner class: HTTP server for streaming decrypted content
+    private class StreamingHTTPServer extends NanoHTTPD {
+        private Map<String, StreamConfig> activeStreams = new HashMap<>();
+        
+        public StreamingHTTPServer(int port) {
+            super(port);
+        }
+        
+        public void registerStream(String streamId, StreamConfig config) {
+            activeStreams.put(streamId, config);
+            Log.d(TAG, "✅ Registered stream: " + streamId);
+        }
+        
+        @Override
+        public Response serve(IHTTPSession session) {
+            String uri = session.getUri();
+            String streamId = uri.substring(1); // Remove leading "/"
+            
+            Log.d(TAG, "🎬 HTTP request received for stream: " + streamId);
+            
+            StreamConfig config = activeStreams.get(streamId);
+            if (config == null) {
+                Log.e(TAG, "❌ Stream not found: " + streamId);
+                return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Stream not found");
+            }
+            
+            try {
+                // Download and decrypt the video
+                byte[] decryptedData = downloadAndDecrypt(config);
+                
+                if (decryptedData == null) {
+                    return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Decryption failed");
+                }
+                
+                Log.d(TAG, "📤 Serving " + decryptedData.length + " bytes to video player");
+                
+                Response response = newFixedLengthResponse(Response.Status.OK, "video/mp4", 
+                    new java.io.ByteArrayInputStream(decryptedData), decryptedData.length);
+                response.addHeader("Accept-Ranges", "bytes");
+                response.addHeader("Access-Control-Allow-Origin", "*");
+                
+                return response;
+                
+            } catch (Exception e) {
+                Log.e(TAG, "❌ Error serving stream: " + e.getMessage());
+                e.printStackTrace();
+                return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, 
+                    "Error: " + e.getMessage());
+            }
+        }
+        
+        private byte[] downloadAndDecrypt(StreamConfig config) {
+            try {
+                Log.d(TAG, "📥 Downloading from: " + config.inputUri);
+                
+                // Setup HTTP connection
+                URL url = new URL(config.inputUri);
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                if (config.token != null && !config.token.isEmpty()) {
+                    connection.setRequestProperty("Authorization", "Bearer " + config.token);
+                }
+                
+                InputStream inputStream = connection.getInputStream();
+                
+                // Setup decryption
+                byte[] keyBytes = Base64.decode(config.keyBase64, Base64.DEFAULT);
+                byte[] ivBytes = Base64.decode(config.ivBase64, Base64.DEFAULT);
+                
+                SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+                IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+                Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+                cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+                
+                // Read and decrypt in chunks
+                ByteArrayOutputStream decryptedOutput = new ByteArrayOutputStream();
+                byte[] buffer = new byte[16 * 1024]; // 16KB chunks
+                int bytesRead;
+                long totalDownloaded = 0;
+                
+                while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    totalDownloaded += bytesRead;
+                    
+                    // Decrypt chunk
+                    byte[] chunkToDecrypt = Arrays.copyOf(buffer, bytesRead);
+                    byte[] decryptedChunk = cipher.update(chunkToDecrypt);
+                    
+                    if (decryptedChunk != null && decryptedChunk.length > 0) {
+                        decryptedOutput.write(decryptedChunk);
+                    }
+                    
+                    if (totalDownloaded % (1024 * 1024) == 0) { // Log every 1MB
+                        Log.d(TAG, "📥 Downloaded and decrypted: " + (totalDownloaded / 1024) + " KB");
+                    }
+                }
+                
+                // Finalize decryption (handle padding)
+                byte[] finalBytes = cipher.doFinal();
+                if (finalBytes != null && finalBytes.length > 0) {
+                    decryptedOutput.write(finalBytes);
+                }
+                
+                inputStream.close();
+                connection.disconnect();
+                
+                Log.d(TAG, "✅ Total decrypted: " + decryptedOutput.size() + " bytes");
+                
+                return decryptedOutput.toByteArray();
+                
+            } catch (Exception e) {
+                Log.e(TAG, "❌ Download and decrypt failed: " + e.getMessage());
+                e.printStackTrace();
+                return null;
+            }
+        }
+    }
+    
+    // ✅ Stream configuration holder
+    private static class StreamConfig {
+        String inputUri;
+        String keyBase64;
+        String ivBase64;
+        String token;
+        
+        StreamConfig(String inputUri, String keyBase64, String ivBase64, String token) {
+            this.inputUri = inputUri;
+            this.keyBase64 = keyBase64;
+            this.ivBase64 = ivBase64;
+            this.token = token;
+        }
     }
     
     @Override
@@ -41,6 +201,42 @@ public class CryptoModule extends ReactContextBaseJavaModule {
         }
         Log.d(TAG, "URI doesn't start with file://, using as-is: " + fileUri);
         return fileUri;
+    }
+    
+    // ✅ NEW: Start progressive streaming via local HTTP server
+    @ReactMethod
+    public void decryptFileViaHTTPServer(String inputUri, String keyBase64, String ivBase64, String token, Promise promise) {
+        try {
+            Log.d(TAG, "=== DECRYPT VIA HTTP SERVER START ===");
+            Log.d(TAG, "inputUri: " + inputUri);
+            
+            if (httpServer == null || !httpServer.isAlive()) {
+                promise.reject("SERVER_NOT_RUNNING", "HTTP server is not running");
+                return;
+            }
+            
+            // Generate unique stream ID
+            String streamId = UUID.randomUUID().toString();
+            String localURL = "http://localhost:" + httpServer.getListeningPort() + "/" + streamId;
+            
+            Log.d(TAG, "🌐 Stream will be available at: " + localURL);
+            
+            // Register stream configuration
+            StreamConfig config = new StreamConfig(inputUri, keyBase64, ivBase64, token);
+            httpServer.registerStream(streamId, config);
+            
+            // Resolve with local HTTP URL
+            WritableMap result = Arguments.createMap();
+            result.putBoolean("success", true);
+            result.putString("localURL", localURL);
+            result.putString("streamId", streamId);
+            
+            promise.resolve(result);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to create stream: " + e.getMessage());
+            promise.reject("STREAM_CREATION_FAILED", e.getMessage());
+        }
     }
     
     @ReactMethod
@@ -376,9 +572,9 @@ public class CryptoModule extends ReactContextBaseJavaModule {
             promise.reject("DECRYPT_FAILED", "Text decryption failed: " + e.getMessage());
         }
     }
-    // ✅ UPDATED: Add progress callback support to Android
+    // ✅ COMPLETE: Progressive streaming decryption with immediate chunk processing (matching iOS)
     @ReactMethod
-    public void decryptFileWithStreaming(String inputUri, String outputUri, String keyBase64, String ivBase64, String token, int chunkSize, Callback progressCallback, Promise promise) {
+    public void decryptFileWithStreaming(String inputUri, String outputUri, String keyBase64, String ivBase64, String token, int chunkSize, Promise promise) {
         try {
             Log.d(TAG, "=== STREAMING DECRYPTION START ===");
             Log.d(TAG, "inputUri: " + inputUri);
@@ -390,74 +586,128 @@ public class CryptoModule extends ReactContextBaseJavaModule {
                 chunkSize = 1024 * 1024; // Default 1MB
             }
             
+            // ✅ Force AES block alignment (16 bytes)
+            chunkSize = (chunkSize / 16) * 16;
+            Log.d(TAG, "chunkSize (aligned): " + chunkSize);
+            
             // Convert file URIs to local paths
             String inputPath = convertFileUriToPath(inputUri);
             String outputPath = convertFileUriToPath(outputUri);
             
-            // Validate inputs
-            if (inputPath == null || inputPath.isEmpty()) {
-                promise.reject("DECRYPT_FAILED", "Invalid input path");
+            // Convert base64 keys early
+            byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
+            byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
+            
+            if (keyBytes.length != 32) {
+                promise.reject("DECRYPT_FAILED", "Invalid key data length: " + keyBytes.length);
                 return;
             }
             
-            // ✅ Download file first if it's HTTP URL
+            if (ivBytes.length != 16) {
+                promise.reject("DECRYPT_FAILED", "Invalid IV data length: " + ivBytes.length);
+                return;
+            }
+            
+            // ✅ Progressive streaming for HTTP URLs (matches iOS NSURLSessionDataDelegate)
             if (inputUri.startsWith("http")) {
-                Log.d(TAG, "Downloading file from: " + inputUri);
+                Log.d(TAG, "🚀 Starting progressive streaming from: " + inputUri);
                 
-                // ✅ Send download progress
-                if (progressCallback != null) {
-                    progressCallback.invoke(0, "downloading");
+                // Create output directory first
+                File outputFile = new File(outputPath);
+                File outputDir = outputFile.getParentFile();
+                if (outputDir != null && !outputDir.exists()) {
+                    if (!outputDir.mkdirs()) {
+                        promise.reject("DECRYPT_FAILED", "Failed to create output directory");
+                        return;
+                    }
                 }
                 
-                // Create temp file for download
-                String tempPath = outputPath + "_temp_encrypted";
+                // Create output stream immediately
+                FileOutputStream outputStream = new FileOutputStream(outputFile);
                 
-                // Simple download implementation
-                try {
-                    java.net.URL url = new java.net.URL(inputUri);
-                    java.net.HttpURLConnection connection = (java.net.HttpURLConnection) url.openConnection();
+                // Create cipher for progressive decryption
+                SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+                IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+                Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+                cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+                
+                Log.d(TAG, "✅ Cipher created for AES-CBC streaming decryption");
+                
+                // Setup HTTP connection with progressive chunk reception
+                URL url = new URL(inputUri);
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                if (token != null && !token.isEmpty()) {
                     connection.setRequestProperty("Authorization", "Bearer " + token);
-                    
-                    java.io.InputStream inputStream = connection.getInputStream();
-                    java.io.FileOutputStream outputStream = new java.io.FileOutputStream(tempPath);
-                    
-                    // ✅ Track download progress
-                    long totalSize = connection.getContentLength();
-                    long downloadedSize = 0;
-                    
-                    byte[] buffer = new byte[4096];
-                    int bytesRead;
-                    while ((bytesRead = inputStream.read(buffer)) != -1) {
-                        outputStream.write(buffer, 0, bytesRead);
-                        downloadedSize += bytesRead;
+                }
+                
+                InputStream inputStream = connection.getInputStream();
+                
+                // ✅ Allocate decryption buffer
+                int bufferSize = chunkSize + 16; // Extra space for AES blocks
+                byte[] inputBuffer = new byte[16 * 1024]; // 16KB network chunks (matches iOS)
+                byte[] outputBuffer = new byte[bufferSize];
+                
+                long totalDownloaded = 0;
+                int bytesRead;
+                
+                Log.d(TAG, "📡 Receiving and decrypting data progressively...");
+                
+                try {
+                    // ✅ Read network chunks and decrypt immediately as they arrive
+                    while ((bytesRead = inputStream.read(inputBuffer)) != -1) {
+                        totalDownloaded += bytesRead;
                         
-                        // ✅ Send download progress (0-20%)
-                        if (progressCallback != null && totalSize > 0) {
-                            double progressPercent = ((double)downloadedSize / (double)totalSize) * 20.0;
-                            progressCallback.invoke(progressPercent, "downloading");
+                        Log.d(TAG, String.format("📥 Received chunk: %d bytes, total so far: %d bytes", 
+                            bytesRead, totalDownloaded));
+                        
+                        // ✅ Decrypt this chunk immediately using cipher.update()
+                        int outputLength = cipher.update(inputBuffer, 0, bytesRead, outputBuffer);
+                        
+                        if (outputLength > 0) {
+                            // ✅ Write decrypted data immediately
+                            outputStream.write(outputBuffer, 0, outputLength);
+                            
+                            // ✅ CRITICAL: Force flush so JavaScript FileSystem.getInfoAsync() 
+                            // sees the file growth immediately (matches iOS streamStatus)
+                            outputStream.flush();
+                            outputStream.getFD().sync(); // Force OS-level sync
+                            
+                            Log.d(TAG, String.format("✅ Decrypted and wrote: %d bytes (flushed)", outputLength));
                         }
                     }
                     
+                    // ✅ Finalize decryption (handle padding removal)
+                    int finalLength = cipher.doFinal(outputBuffer, 0);
+                    if (finalLength > 0) {
+                        outputStream.write(outputBuffer, 0, finalLength);
+                        outputStream.flush();
+                        Log.d(TAG, String.format("✅ Final padding removal: %d bytes", finalLength));
+                    }
+                    
+                    Log.d(TAG, String.format("✅ Total downloaded and decrypted: %d bytes", totalDownloaded));
+                    
+                } finally {
                     inputStream.close();
                     outputStream.close();
                     connection.disconnect();
-                    
-                    inputPath = tempPath;
-                    Log.d(TAG, "File downloaded to: " + inputPath);
-                    
-                    // ✅ Send download complete progress
-                    if (progressCallback != null) {
-                        progressCallback.invoke(20, "download_complete");
-                    }
-                    
-                } catch (Exception downloadError) {
-                    Log.e(TAG, "Download failed: " + downloadError.getMessage());
-                    promise.reject("DOWNLOAD_FAILED", "Failed to download file: " + downloadError.getMessage());
-                    return;
                 }
+                
+                Log.d(TAG, "✅ Progressive streaming completed successfully!");
+                
+                // Verify output file
+                if (outputFile.exists()) {
+                    WritableMap result = Arguments.createMap();
+                    result.putBoolean("success", true);
+                    result.putString("localPath", outputUri);
+                    result.putDouble("size", outputFile.length());
+                    promise.resolve(result);
+                } else {
+                    promise.reject("DECRYPT_FAILED", "Output file verification failed");
+                }
+                return;
             }
             
-            // Check if input file exists
+            // ✅ For local files - standard streaming decryption
             File inputFile = new File(inputPath);
             if (!inputFile.exists()) {
                 Log.e(TAG, "Input file does not exist at path: " + inputPath);
@@ -475,37 +725,21 @@ public class CryptoModule extends ReactContextBaseJavaModule {
                 }
             }
             
-            // Convert base64 to bytes
-            byte[] keyBytes = Base64.decode(keyBase64, Base64.DEFAULT);
-            byte[] ivBytes = Base64.decode(ivBase64, Base64.DEFAULT);
+            // Create empty output file for polling detection
+            new FileOutputStream(outputFile).close();
+            Log.d(TAG, "✅ Created empty output file for streaming: " + outputPath);
             
-            if (keyBytes.length != 32) {
-                promise.reject("DECRYPT_FAILED", "Invalid key data length: " + keyBytes.length);
-                return;
-            }
-            
-            if (ivBytes.length != 16) {
-                promise.reject("DECRYPT_FAILED", "Invalid IV data length: " + ivBytes.length);
-                return;
-            }
-            
-            // ✅ Send decryption start progress
-            if (progressCallback != null) {
-                progressCallback.invoke(25, "decryption_start");
-            }
-            
-            // ✅ STREAMING DECRYPTION with proper padding handling
+            // ✅ Streaming decryption with proper padding handling
             SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
             IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
             
             FileInputStream fis = new FileInputStream(inputFile);
             FileOutputStream fos = new FileOutputStream(outputFile);
             
-            // ✅ Create cipher in streaming mode
             Cipher cipher = Cipher.getInstance(TRANSFORMATION);
             cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
             
-            byte[] inputBuffer = new byte[chunkSize + 16]; // Extra space for block alignment
+            byte[] inputBuffer = new byte[chunkSize];
             byte[] outputBuffer = new byte[chunkSize + 16];
             
             long totalBytes = inputFile.length();
@@ -514,62 +748,35 @@ public class CryptoModule extends ReactContextBaseJavaModule {
             Log.d(TAG, "Starting streaming decryption, total size: " + totalBytes);
             
             int bytesRead;
-            boolean isFirstChunk = true;
-            boolean isLastChunk = false;
             
             while ((bytesRead = fis.read(inputBuffer)) != -1) {
                 processedBytes += bytesRead;
-                isLastChunk = (processedBytes >= totalBytes);
+                boolean isLastChunk = (processedBytes >= totalBytes);
                 
-                Log.d(TAG, "Processing chunk: " + bytesRead + " bytes, isLast: " + isLastChunk);
-                
-                // ✅ Calculate and send progress (25-90%)
-                if (progressCallback != null && totalBytes > 0) {
-                    double progressPercent = 25.0 + ((double)processedBytes / (double)totalBytes) * 65.0;
-                    progressCallback.invoke(progressPercent, "decrypting");
-                }
-                
-                byte[] chunkToDecrypt = new byte[bytesRead];
-                System.arraycopy(inputBuffer, 0, chunkToDecrypt, 0, bytesRead);
+                Log.d(TAG, String.format("Processing chunk: %d bytes, total: %d/%d, isLast: %b", 
+                    bytesRead, processedBytes, totalBytes, isLastChunk));
                 
                 int outputLength;
                 
                 if (isLastChunk) {
-                    // ✅ Final chunk - handle padding removal
-                    outputLength = cipher.doFinal(chunkToDecrypt, 0, bytesRead, outputBuffer);
+                    // ✅ Final chunk - handle padding removal with doFinal
+                    outputLength = cipher.doFinal(inputBuffer, 0, bytesRead, outputBuffer);
                     Log.d(TAG, "Final chunk decrypted: " + outputLength + " bytes");
                 } else {
-                    // ✅ Intermediate chunk - no padding
-                    outputLength = cipher.update(chunkToDecrypt, 0, bytesRead, outputBuffer);
+                    // ✅ Intermediate chunk - use update
+                    outputLength = cipher.update(inputBuffer, 0, bytesRead, outputBuffer);
                     Log.d(TAG, "Intermediate chunk decrypted: " + outputLength + " bytes");
                 }
                 
                 if (outputLength > 0) {
                     fos.write(outputBuffer, 0, outputLength);
                 }
-                
-                isFirstChunk = false;
             }
             
             fis.close();
             fos.close();
             
-            // ✅ Send processing progress
-            if (progressCallback != null) {
-                progressCallback.invoke(90, "processing");
-            }
-            
-            // ✅ Clean up temp file if we downloaded
-            if (inputUri.startsWith("http")) {
-                new File(inputPath).delete();
-            }
-            
-            Log.d(TAG, "✅ Streaming decryption completed");
-            
-            // ✅ Send completion progress
-            if (progressCallback != null) {
-                progressCallback.invoke(100, "complete");
-            }
+            Log.d(TAG, "✅ Streaming decryption completed successfully");
             
             // Verify output file
             if (outputFile.exists()) {
@@ -577,7 +784,6 @@ public class CryptoModule extends ReactContextBaseJavaModule {
                 result.putBoolean("success", true);
                 result.putString("localPath", outputUri);
                 result.putDouble("size", outputFile.length());
-                
                 promise.resolve(result);
             } else {
                 promise.reject("DECRYPT_FAILED", "Output file verification failed");
@@ -585,6 +791,7 @@ public class CryptoModule extends ReactContextBaseJavaModule {
             
         } catch (Exception e) {
             Log.e(TAG, "Streaming decryption failed: " + e.getMessage(), e);
+            e.printStackTrace();
             promise.reject("DECRYPT_FAILED", "Streaming decryption failed: " + e.getMessage());
         }
     }

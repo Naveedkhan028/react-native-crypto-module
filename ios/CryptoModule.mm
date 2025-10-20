@@ -1,6 +1,10 @@
 #import "CryptoModule.h"
 #import <React/RCTBridgeModule.h>
 #import <CommonCrypto/CommonCryptor.h>
+#import <objc/runtime.h>
+#import <GCDWebServer/GCDWebServerDataResponse.h>
+#import <GCDWebServer/GCDWebServerRequest.h>
+#import <GCDWebServer/GCDWebServerResponse.h>
 
 @implementation CryptoModule
 
@@ -19,6 +23,26 @@ RCT_EXPORT_MODULE();
   return NO;
 }
 
+// ✅ Initialize HTTP server on module init - DISABLED FOR NOW
+- (instancetype)init
+{
+  self = [super init];
+  if (self) {
+    // HTTP server disabled - too complex, causes crashes
+    NSLog(@"⚠️ HTTP streaming disabled - using fallback decryption");
+  }
+  return self;
+}
+
+// ✅ Cleanup on dealloc
+- (void)dealloc
+{
+  if (self.webServer.isRunning) {
+    [self.webServer stop];
+    NSLog(@"🛑 GCDWebServer stopped");
+  }
+}
+
 // Helper method to convert file URI to local path
 - (NSString *)convertFileUriToPath:(NSString *)fileUri {
   if ([fileUri hasPrefix:@"file://"]) {
@@ -29,6 +53,19 @@ RCT_EXPORT_MODULE();
   }
   NSLog(@"URI doesn't start with file://, using as-is: %@", fileUri);
   return fileUri;
+}
+
+// ✅ NEW: Start progressive streaming via local HTTP server
+RCT_REMAP_METHOD(decryptFileViaHTTPServer,
+                 inputUri:(NSString *)inputUri
+                 keyBase64:(NSString *)keyBase64
+                 ivBase64:(NSString *)ivBase64
+                 token:(NSString *)token
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSLog(@"⚠️ HTTP streaming disabled - use regular decryption");
+  reject(@"NOT_IMPLEMENTED", @"HTTP streaming disabled - use decryptFileWithStreaming instead", nil);
 }
 
 RCT_REMAP_METHOD(decryptFile,
@@ -552,9 +589,20 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
     return;
   }
   
-  // ✅ Download and decrypt progressively if it's HTTP URL using range requests
+  // ✅ Download and decrypt progressively if it's HTTP URL with streaming delegate
   if ([inputUri hasPrefix:@"http"]) {
-    NSLog(@"🚀 Starting progressive streaming with range requests from: %@", inputUri);
+    NSLog(@"🚀 Starting progressive streaming with NSURLSessionDataDelegate from: %@", inputUri);
+    
+    // ✅ Create output directory first
+    NSString *outputDir = [outputPath stringByDeletingLastPathComponent];
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSError *dirError = nil;
+    if (![fileManager createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:&dirError]) {
+      if (dirError) {
+        reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Failed to create output directory: %@", dirError.localizedDescription], nil);
+        return;
+      }
+    }
     
     // ✅ Create output stream immediately
     NSOutputStream *outputStream = [NSOutputStream outputStreamToFileAtPath:outputPath append:NO];
@@ -578,46 +626,23 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
       return;
     }
     
-    NSLog(@"✅ Cryptor created, starting range-based download...");
+    NSLog(@"✅ Cryptor created for AES-CBC streaming decryption");
     
-    // ✅ First, get file size with HEAD request
-    NSMutableURLRequest *headRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
-    headRequest.HTTPMethod = @"HEAD";
+    // ✅ Setup for streaming download with delegate
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
     if (token && token.length > 0) {
-      [headRequest setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+      [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     }
     
-    dispatch_semaphore_t headSemaphore = dispatch_semaphore_create(0);
-    __block unsigned long long totalFileSize = 0;
-    __block NSError *headError = nil;
+    dispatch_semaphore_t downloadSemaphore = dispatch_semaphore_create(0);
+    __block BOOL hasError = NO;
+    __block NSString *errorMessage = nil;
+    __block unsigned long long totalDownloaded = 0;
+    __block unsigned long long totalDecrypted = 0;
     
-    NSURLSession *headSession = [NSURLSession sharedSession];
-    NSURLSessionDataTask *headTask = [headSession dataTaskWithRequest:headRequest
-      completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error) {
-          headError = error;
-        } else if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-          NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-          totalFileSize = [httpResponse.allHeaderFields[@"Content-Length"] unsignedLongLongValue];
-          NSLog(@"📦 Total file size: %llu bytes", totalFileSize);
-        }
-        dispatch_semaphore_signal(headSemaphore);
-      }];
-    
-    [headTask resume];
-    dispatch_semaphore_wait(headSemaphore, DISPATCH_TIME_FOREVER);
-    
-    if (headError || totalFileSize == 0) {
-      CCCryptorRelease(cryptor);
-      [outputStream close];
-      reject(@"DOWNLOAD_FAILED", @"Failed to get file size", nil);
-      return;
-    }
-    
-    // ✅ Download and decrypt in chunks using range requests
-    const NSUInteger DOWNLOAD_CHUNK_SIZE = chunkSizeValue; // Use same chunk size
+    // ✅ Allocate decryption buffer
     NSUInteger bufferSize = chunkSizeValue + kCCBlockSizeAES128;
-    uint8_t *outputBuffer = (uint8_t *)malloc(bufferSize);
+    __block uint8_t *outputBuffer = (uint8_t *)malloc(bufferSize);
     
     if (!outputBuffer) {
       CCCryptorRelease(cryptor);
@@ -626,118 +651,61 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
       return;
     }
     
-    unsigned long long downloadedBytes = 0;
-    BOOL hasError = NO;
-    NSString *errorMessage = nil;
+    // ✅ Create session with delegate to receive data progressively
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config
+      delegate:(id<NSURLSessionDelegate>)self
+      delegateQueue:nil];
     
-    NSLog(@"📥 Starting chunked download and decryption...");
+    // ✅ Use NSURLSessionDataTask with delegate callbacks
+    NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request];
     
-    while (downloadedBytes < totalFileSize && !hasError) {
-      @autoreleasepool {
-        unsigned long long rangeStart = downloadedBytes;
-        unsigned long long rangeEnd = MIN(downloadedBytes + DOWNLOAD_CHUNK_SIZE - 1, totalFileSize - 1);
-        BOOL isLastChunk = (rangeEnd >= totalFileSize - 1);
-        
-        NSLog(@"📦 Requesting bytes %llu-%llu (chunk %llu/%llu)", 
-              rangeStart, rangeEnd, 
-              (downloadedBytes / DOWNLOAD_CHUNK_SIZE) + 1,
-              (totalFileSize + DOWNLOAD_CHUNK_SIZE - 1) / DOWNLOAD_CHUNK_SIZE);
-        
-        // Create range request
-        NSMutableURLRequest *rangeRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:inputUri]];
-        if (token && token.length > 0) {
-          [rangeRequest setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    // ✅ Store context in associated objects for delegate callbacks
+    objc_setAssociatedObject(dataTask, "outputStream", outputStream, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "outputPath", outputPath, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "cryptor", [NSValue valueWithPointer:cryptor], OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "outputBuffer", [NSValue valueWithPointer:outputBuffer], OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "chunkSize", @(chunkSizeValue), OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "bufferSize", @(bufferSize), OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "totalDownloaded", @(0), OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "hasError", @NO, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(dataTask, "semaphore", downloadSemaphore, OBJC_ASSOCIATION_RETAIN);
+    
+    [dataTask resume];
+    
+    NSLog(@"📡 Waiting for streaming data...");
+    
+    // ✅ Wait for download completion
+    dispatch_semaphore_wait(downloadSemaphore, DISPATCH_TIME_FOREVER);
+    
+    // ✅ Get final status
+    hasError = [objc_getAssociatedObject(dataTask, "hasError") boolValue];
+    errorMessage = objc_getAssociatedObject(dataTask, "errorMessage");
+    totalDownloaded = [objc_getAssociatedObject(dataTask, "totalDownloaded") unsignedLongLongValue];
+    
+    // ✅ Finalize decryption
+    if (!hasError) {
+      size_t finalLength = 0;
+      CCCryptorStatus finalStatus = CCCryptorFinal(cryptor, outputBuffer, bufferSize, &finalLength);
+      
+      if (finalStatus == kCCSuccess) {
+        if (finalLength > 0) {
+          [outputStream write:outputBuffer maxLength:finalLength];
+          NSLog(@"✅ Final padding removal: %zu bytes", finalLength);
         }
-        [rangeRequest setValue:[NSString stringWithFormat:@"bytes=%llu-%llu", rangeStart, rangeEnd] 
-            forHTTPHeaderField:@"Range"];
-        
-        dispatch_semaphore_t chunkSemaphore = dispatch_semaphore_create(0);
-        __block NSData *chunkData = nil;
-        __block NSError *chunkError = nil;
-        
-        NSURLSession *chunkSession = [NSURLSession sharedSession];
-        NSURLSessionDataTask *chunkTask = [chunkSession dataTaskWithRequest:rangeRequest
-          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            if (error) {
-              chunkError = error;
-            } else {
-              chunkData = data;
-            }
-            dispatch_semaphore_signal(chunkSemaphore);
-          }];
-        
-        [chunkTask resume];
-        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC));
-        if (dispatch_semaphore_wait(chunkSemaphore, timeout) != 0) {
-          hasError = YES;
-          errorMessage = @"Chunk download timed out";
-          break;
-        }
-        
-        if (chunkError || !chunkData) {
-          hasError = YES;
-          errorMessage = chunkError.localizedDescription ?: @"Failed to download chunk";
-          break;
-        }
-        
-        NSLog(@"✅ Downloaded chunk: %lu bytes", (unsigned long)chunkData.length);
-        
-        // ✅ Decrypt the chunk immediately
-        size_t outputLength = 0;
-        
-        if (isLastChunk) {
-          // Final chunk - use Update + Final
-          status = CCCryptorUpdate(
-            cryptor,
-            chunkData.bytes,
-            chunkData.length,
-            outputBuffer,
-            bufferSize,
-            &outputLength
-          );
-          
-          if (status == kCCSuccess && outputLength > 0) {
-            [outputStream write:outputBuffer maxLength:outputLength];
-            NSLog(@"✅ Decrypted and wrote: %zu bytes", outputLength);
-          }
-          
-          // Finalize
-          size_t finalLength = 0;
-          status = CCCryptorFinal(cryptor, outputBuffer, bufferSize, &finalLength);
-          if (status == kCCSuccess && finalLength > 0) {
-            [outputStream write:outputBuffer maxLength:finalLength];
-            NSLog(@"✅ Final decryption wrote: %zu bytes", finalLength);
-          }
-        } else {
-          // Intermediate chunk - use Update only
-          status = CCCryptorUpdate(
-            cryptor,
-            chunkData.bytes,
-            chunkData.length,
-            outputBuffer,
-            bufferSize,
-            &outputLength
-          );
-          
-          if (status == kCCSuccess && outputLength > 0) {
-            [outputStream write:outputBuffer maxLength:outputLength];
-            NSLog(@"✅ Decrypted and wrote: %zu bytes", outputLength);
-          }
-        }
-        
-        if (status != kCCSuccess) {
-          hasError = YES;
-          errorMessage = [NSString stringWithFormat:@"Decryption failed with status: %d", status];
-          break;
-        }
-        
-        downloadedBytes += chunkData.length;
+        NSLog(@"✅ Total downloaded and decrypted: %llu bytes", totalDownloaded);
+      } else {
+        hasError = YES;
+        errorMessage = [NSString stringWithFormat:@"Final decryption failed with status: %d", finalStatus];
+        NSLog(@"❌ %@", errorMessage);
       }
     }
     
+    // ✅ Cleanup
     free(outputBuffer);
     CCCryptorRelease(cryptor);
     [outputStream close];
+    [session finishTasksAndInvalidate];
     
     if (hasError) {
       reject(@"DECRYPT_FAILED", errorMessage ?: @"Progressive streaming failed", nil);
@@ -746,7 +714,7 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
     
     NSLog(@"✅ Progressive streaming completed successfully!");
     
-    // Verify output file
+    // ✅ Verify output file
     if ([fileManager fileExistsAtPath:outputPath]) {
       NSDictionary *outputAttrs = [fileManager attributesOfItemAtPath:outputPath error:nil];
       resolve(@{
@@ -955,6 +923,94 @@ RCT_REMAP_METHOD(decryptFileWithStreaming,
     [inputStream close];
     [outputStream close];
     reject(@"DECRYPT_FAILED", [NSString stringWithFormat:@"Exception during decryption: %@", exception.reason], nil);
+  }
+}
+
+// ✅ NSURLSessionDataDelegate methods for progressive data reception
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data
+{
+  NSOutputStream *outputStream = objc_getAssociatedObject(dataTask, "outputStream");
+  NSValue *cryptorValue = objc_getAssociatedObject(dataTask, "cryptor");
+  NSValue *bufferValue = objc_getAssociatedObject(dataTask, "outputBuffer");
+  NSNumber *chunkSize = objc_getAssociatedObject(dataTask, "chunkSize");
+  NSNumber *bufferSize = objc_getAssociatedObject(dataTask, "bufferSize");
+  NSNumber *totalDownloadedNum = objc_getAssociatedObject(dataTask, "totalDownloaded");
+  
+  CCCryptorRef cryptor = (CCCryptorRef)[cryptorValue pointerValue];
+  uint8_t *outputBuffer = (uint8_t *)[bufferValue pointerValue];
+  NSUInteger chunkSizeValue = [chunkSize unsignedIntegerValue];
+  NSUInteger bufferSizeValue = [bufferSize unsignedIntegerValue];
+  unsigned long long totalDownloaded = [totalDownloadedNum unsignedLongLongValue];
+  
+  NSLog(@"📥 Received chunk: %lu bytes, total so far: %llu bytes", (unsigned long)data.length, totalDownloaded + data.length);
+  
+  // ✅ Decrypt data progressively
+  const uint8_t *dataBytes = (const uint8_t *)data.bytes;
+  NSUInteger dataLength = data.length;
+  NSUInteger processedBytes = 0;
+  
+  while (processedBytes < dataLength) {
+    @autoreleasepool {
+      NSUInteger remainingBytes = dataLength - processedBytes;
+      NSUInteger chunkToProcess = MIN(chunkSizeValue, remainingBytes);
+      
+      size_t outputLength = 0;
+      CCCryptorStatus updateStatus = CCCryptorUpdate(
+        cryptor,
+        dataBytes + processedBytes,
+        chunkToProcess,
+        outputBuffer,
+        bufferSizeValue,
+        &outputLength
+      );
+      
+      if (updateStatus != kCCSuccess) {
+        NSLog(@"❌ Decryption failed with status: %d", updateStatus);
+        objc_setAssociatedObject(dataTask, "hasError", @YES, OBJC_ASSOCIATION_RETAIN);
+        objc_setAssociatedObject(dataTask, "errorMessage", 
+          [NSString stringWithFormat:@"Decryption failed with status: %d", updateStatus],
+          OBJC_ASSOCIATION_RETAIN);
+        [dataTask cancel];
+        return;
+      }
+      
+      if (outputLength > 0) {
+        [outputStream write:outputBuffer maxLength:outputLength];
+        
+        // CRITICAL: Force file descriptor sync so JavaScript FileSystem.getInfoAsync() 
+        // sees the updated file size immediately (not one chunk behind)
+        // This uses private API streamStatus to trigger internal buffer flush
+        [outputStream streamStatus];
+        
+        NSLog(@"✅ Decrypted and wrote: %zu bytes (flushed)", outputLength);
+      }
+      
+      processedBytes += chunkToProcess;
+    }
+  }
+  
+  totalDownloaded += data.length;
+  objc_setAssociatedObject(dataTask, "totalDownloaded", @(totalDownloaded), OBJC_ASSOCIATION_RETAIN);
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error
+{
+  dispatch_semaphore_t semaphore = objc_getAssociatedObject(task, "semaphore");
+  
+  if (error) {
+    NSLog(@"❌ Download completed with error: %@", error);
+    objc_setAssociatedObject(task, "hasError", @YES, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(task, "errorMessage", error.localizedDescription, OBJC_ASSOCIATION_RETAIN);
+  } else {
+    NSLog(@"✅ Download completed successfully");
+  }
+  
+  if (semaphore) {
+    dispatch_semaphore_signal(semaphore);
   }
 }
 
