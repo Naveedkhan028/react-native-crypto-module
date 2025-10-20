@@ -319,12 +319,18 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Changelog
 
+### v2.2.8
+
+- Fixed android vidoe streaming.
+- ❌ IOS streaming is not working due to AV limitations, it will the file as a whole in chunks
+
 ### v2.0.0
+
 - ✨ Added streaming encryption support
 - ✨ Added text content decryption
 - 🚀 Improved performance with native implementations
 - 📱 Enhanced error handling and logging
 - 🔧 Better auto-linking support
+- Fixed 
 
-### v1.0.0
 - 🎉 Initial release with file decryption support
