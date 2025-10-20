@@ -321,7 +321,7 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 
 ### v2.2.8
 
-- Fixed android vidoe streaming.
+- ✔️ Fixed android vidoe streaming.
 - ❌ IOS streaming is not working due to AV limitations, it will the file as a whole in chunks
 
 ### v2.0.0
